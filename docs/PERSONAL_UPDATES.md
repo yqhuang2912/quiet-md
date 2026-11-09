@@ -8,11 +8,11 @@
 
 Windows 从个人 Release 下载 `quiet-md-<版本>-windows-x64-setup.exe` 并安装一次；以后即可在应用中更新。旧的开发用单文件 EXE 不具备安装信息，需要手动完成这次安装。个人安装包使用独立 AppId、安装目录 `Programs/MyNote` 和快捷方式「Quiet.md MyNote」。笔记仍使用现有 Quiet.md 文档库，已有 NAS 同步配置不变。
 
-macOS 下载对应架构 ZIP，将 `quiet.md.app` 安装到可写的应用目录。个人包默认使用 ad-hoc 签名，并由个人 Minisign 密钥验证更新；没有 Apple Developer ID 公证，首次运行仍可能出现系统确认。具备自己的 Developer ID 和公证配置后，可将 `scripts/release.sh` 的正式签名流程用于发布。已有 Developer ID 应用的更新仍要求相同 Apple 团队。
+macOS 只发布 Apple Silicon（M 系列）ZIP，将 `quiet.md.app` 安装到可写的应用目录。个人包默认使用 ad-hoc 签名，并由个人 Minisign 密钥验证更新；没有 Apple Developer ID 公证，首次运行仍可能出现系统确认。具备自己的 Developer ID 和公证配置后，可将 `scripts/release.sh` 的正式签名流程用于发布。已有 Developer ID 应用的更新仍要求相同 Apple 团队。
 
 ## 发布流程
 
-工作流为 `.github/workflows/personal-release.yml`，同时构建 Windows x64、macOS Apple Silicon 和 Intel。版本已为首个个人版本准备为 `0.2.0`。发布包、校验和、Minisign 签名和三个 `update-<平台>.json` 全部上传到草稿 Release 后，才将其公开并标记为 latest，防止运行中的客户端读到未上传完成的安装包。
+工作流为 `.github/workflows/personal-release.yml`，只构建 Windows x64 和 macOS Apple Silicon，不构建 Intel Mac。版本已为首个个人版本准备为 `0.2.0`。发布包、校验和、Minisign 签名和两个 `update-<平台>.json` 全部上传到草稿 Release 后，才将其公开并标记为 latest，防止运行中的客户端读到未上传完成的安装包。
 
 正常发布新版本：
 
@@ -25,12 +25,13 @@ macOS 下载对应架构 ZIP，将 `quiet.md.app` 安装到可写的应用目录
 
 也可以在 GitHub Actions 手动运行「Personal release」：默认只准备草稿，勾选 `publish` 才公开。第一次推送发布标签或从 Actions 发布之前，应确认该提交包含所有需要交付的个人改动。
 
+若构建成功、仅发布阶段失败，可在手动运行时填写 `packages_run_id`，复用该次构建的安装包，不必重新编译。`scripts/release-source.py` 会检查两个构建任务成功、构建提交与发布标签一致，并确认更新公钥一致。签名工具从 Minisign 官方的固定版本下载并校验 SHA-256，不依赖 Ubuntu 软件源是否提供此包。
+
 清单的固定检查地址为：
 
 ```text
 https://github.com/yqhuang2912/quiet-md/releases/latest/download/update-windows-x64.json
 https://github.com/yqhuang2912/quiet-md/releases/latest/download/update-macos-arm64.json
-https://github.com/yqhuang2912/quiet-md/releases/latest/download/update-macos-x86_64.json
 ```
 
 每份清单中的安装包 URL 固定到 `mynote-v<版本>`，包含版本、大小和完整 Minisign 签名。客户端下载后校验大小、签名、公钥和签名中的文件名，拒绝损坏、冒充版本或来自其他仓库的更新包。

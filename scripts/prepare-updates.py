@@ -10,7 +10,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY = "yqhuang2912/quiet-md"
-PLATFORMS = ("windows-x64", "macos-arm64", "macos-x86_64")
+PLATFORMS = ("windows-x64", "macos-arm64")
 
 
 def package_name(version, platform):
