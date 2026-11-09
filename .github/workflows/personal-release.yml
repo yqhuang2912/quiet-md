@@ -35,6 +35,8 @@ jobs:
       - name: Validate release tag
         run: python3 scripts/check-release-tag.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
       - name: Tests and clippy
         run: python3 scripts/check.py
       - name: Package Apple Silicon
@@ -56,6 +58,8 @@ jobs:
       - name: Validate release tag
         run: python scripts/check-release-tag.py
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
       - name: Check and package Windows
         shell: pwsh
         run: |

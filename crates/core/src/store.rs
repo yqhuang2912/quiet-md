@@ -330,7 +330,7 @@ fn save_json<T: Serialize>(path: &std::path::Path, v: &T) -> Result<()> {
 
 /// Image path for an image block source (only local files are displayed).
 pub fn image_path(src: &str) -> Option<PathBuf> {
-    let p = location::resolve(std::path::Path::new(src.strip_prefix("file://").unwrap_or(src)));
+    let p = PathBuf::from(src.strip_prefix("file://").unwrap_or(src));
     if p.is_absolute() {
         return Some(p);
     }
@@ -350,10 +350,8 @@ pub fn export_path(src: &str) -> Option<PathBuf> {
 }
 
 pub fn export_path_in(root: &std::path::Path, src: &str) -> Option<PathBuf> {
-    let active = root == Store::root_dir();
     let root = root.canonicalize().ok()?;
-    let raw = PathBuf::from(src.strip_prefix("file://").unwrap_or(src));
-    let raw = if active { location::resolve(&raw) } else { raw };
+    let raw = std::path::Path::new(src.strip_prefix("file://").unwrap_or(src));
     let path = if raw.is_absolute() { raw.to_path_buf() } else { root.join(raw) }.canonicalize().ok()?;
     (path.starts_with(root) && path.is_file()).then_some(path)
 }

@@ -6,11 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, sync::OnceLock};
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
-static ALIASES: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct Location { root: Option<PathBuf>, pending: Option<Migration>, aliases: Vec<PathBuf>, confirmed: bool, create: bool }
+struct Location { root: Option<PathBuf>, pending: Option<Migration>, confirmed: bool, create: bool }
 #[derive(Clone, Serialize, Deserialize)]
 struct Migration { source: PathBuf, target: PathBuf }
 
@@ -82,27 +81,12 @@ fn plain(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
-fn rebase(path: &Path, aliases: &[PathBuf], root: &Path) -> PathBuf {
-    let path = plain(path);
-    for old in aliases {
-        if let Ok(relative) = path.strip_prefix(plain(old)) { return root.join(relative); }
-    }
-    path
-}
-/// Old absolute image/attachment paths follow the copy even after its backup
-/// is removed. Relative references and files outside the old library stay as-is.
-pub fn resolve(path: &Path) -> PathBuf {
-    if overridden() { return path.to_path_buf(); }
-    let aliases = ALIASES.get_or_init(|| read(&config_path()).map(|c| c.aliases).unwrap_or_default());
-    rebase(path, aliases, &root_dir())
-}
 
 /// A failed migration keeps using the original library and reports the error.
 /// An unavailable saved library is an error, never a silently created empty one.
 pub fn initialize() -> Result<Option<String>> {
     if let Some(root) = std::env::var_os("QUIET_MD_HOME") { let _ = ROOT.set(root.into()); return Ok(None); }
     let (root, warning) = initialize_at(&config_path(), default_root())?;
-    let _ = ALIASES.set(read(&config_path())?.aliases);
     let _ = ROOT.set(root);
     Ok(warning)
 }
@@ -120,7 +104,6 @@ fn initialize_at(path: &Path, fallback: PathBuf) -> Result<(PathBuf, Option<Stri
             copy_library(&migration.source, &migration.target)?;
             config.root = Some(migration.target.clone());
             config.pending = None;
-            if !config.aliases.contains(&migration.source) { config.aliases.push(migration.source.clone()); }
             save(path, &config)?;
             root = migration.target;
             Ok(())
@@ -236,9 +219,6 @@ mod tests {
         assert_eq!(root, plain(&target.canonicalize().unwrap()));
         for file in ["docs/note.xml", "assets/image.png", "trash/index.json", "preferences.json", ".nas-sync/config.json", ".nas-sync/state.json", "format.json"] { assert_eq!(fs::read(source.join(file)).unwrap(), fs::read(target.join(file)).unwrap()); }
         assert!(read(&config).unwrap().pending.is_none());
-        let old_asset = source.join("assets/image.png");
-        assert_eq!(rebase(&old_asset, &read(&config).unwrap().aliases, &root), root.join("assets/image.png"));
-        assert_eq!(rebase(&target.parent().unwrap().join("external.md"), &read(&config).unwrap().aliases, &root), target.parent().unwrap().join("external.md"));
         assert_eq!(initialize_at(&config, source).unwrap().0, root);
     }
     #[test]
