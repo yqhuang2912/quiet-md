@@ -127,16 +127,24 @@ jobs:
           RELEASE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           tag=$(python3 scripts/check-release-tag.py)
-          if gh api "repos/$GH_REPO/releases/tags/$tag" > "$RUNNER_TEMP/mynote-release.json" 2>/dev/null; then
-            target=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["draft"], "Refusing to overwrite a published release"; print(r["target_commitish"])' "$RUNNER_TEMP/mynote-release.json")
-            commit=$(gh api "repos/$GH_REPO/commits/$target" --jq .sha)
+          # The REST by-tag endpoint excludes drafts; the CLI's GraphQL lookup includes them.
+          if gh release view "$tag" --json isDraft,targetCommitish > "$RUNNER_TEMP/mynote-release.json" 2>/dev/null; then
+            target=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["isDraft"], "Refusing to overwrite a published release"; print(r["targetCommitish"])' "$RUNNER_TEMP/mynote-release.json")
+            commit=$(gh api "repos/$GH_REPO/commits/$tag" --jq .sha 2>/dev/null || gh api "repos/$GH_REPO/commits/$target" --jq .sha)
             test "$commit" = "$RELEASE_SHA" || { echo 'Draft belongs to a different source commit; use a new version'; exit 1; }
           else
+            # For an existing tag, do not send target_commitish: GitHub checks
+            # workflow-write permissions against it even though the tag already fixes the source.
+            if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+              create_args=(--verify-tag)
+            else
+              create_args=(--target "$RELEASE_SHA")
+            fi
             notes="docs/releases/${tag#mynote-v}.md"
             if [ -f "$notes" ]; then
-              gh release create "$tag" --draft --target "$RELEASE_SHA" --title "MyNote ${tag#mynote-v}" --notes-file "$notes"
+              gh release create "$tag" --draft "${create_args[@]}" --title "MyNote ${tag#mynote-v}" --notes-file "$notes"
             else
-              gh release create "$tag" --draft --target "$RELEASE_SHA" --title "MyNote ${tag#mynote-v}" --generate-notes
+              gh release create "$tag" --draft "${create_args[@]}" --title "MyNote ${tag#mynote-v}" --generate-notes
             fi
           fi
           gh release upload "$tag" dist/github-release/* --clobber
