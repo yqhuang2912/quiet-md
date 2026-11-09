@@ -15,6 +15,11 @@ const RADIUS: f32 = 12.;
 /// Each version's notes: (version, [(中文, English)]). Only the running
 /// version's are shown; a version without notes shows nothing.
 const NOTES: &[(&str, &[(&str, &str)])] = &[
+    ("0.2.1", &[
+        ("Windows 安装时选择文档库位置，macOS 首次启动确认，升级时保留选择", "Choose storage during Windows installation or first launch on macOS; updates keep your choice"),
+        ("可在设置中自定义文档库文件夹，重启时完整复制并保留原目录备份", "Choose a library folder in Settings; restart copies the full library and keeps the original as a backup"),
+        ("更新清单移至独立分支，Release 仅上传 Windows 和 Apple Silicon 安装包", "Update manifests move to a separate branch; Releases upload only Windows and Apple Silicon packages"),
+    ]),
     ("0.2.0", &[
         ("个人版本：通过 NAS 与 Tailscale 同步笔记和附件", "Personal edition: sync notes and attachments through a NAS and Tailscale"),
         ("新增慢变量图片、图注与代码样式，表格保持原配色并居中", "Manbianliang image, caption and code styles; centred tables keep their existing colours"),

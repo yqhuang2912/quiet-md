@@ -1,6 +1,6 @@
 //! 自动更新. A copy installed from a release package reads
-//! this fork's GitHub Releases `update-<platform>.json` (published with its
-//! signed packages) 10s after launch and every 12h while
+//! this fork's `updates` branch for `update-<platform>.json` (pointing at
+//! signed GitHub Release packages) 10s after launch and every 12h while
 //! 自动检查更新 is on; 检查更新… asks at once. Nothing is downloaded until the
 //! user asks: the package is fetched with `curl`, its minisign signature checked
 //! against packaging/mynote-update-key.pub (the trusted comment must be the package's
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 pub const REPOSITORY: &str = "yqhuang2912/quiet-md";
 const RELEASES: &str = "https://github.com/yqhuang2912/quiet-md/releases";
-const BASE: &str = "https://github.com/yqhuang2912/quiet-md/releases/latest/download";
+const BASE: &str = "https://raw.githubusercontent.com/yqhuang2912/quiet-md/updates";
 const KEY: &str = match option_env!("QUIET_MD_UPDATE_PUBKEY") { Some(k) => k, None => include_str!("../packaging/mynote-update-key.pub") };
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

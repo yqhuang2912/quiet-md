@@ -1,10 +1,12 @@
 # 个人版本的自动更新
 
-更新源是 [yqhuang2912/quiet-md 的 GitHub Releases](https://github.com/yqhuang2912/quiet-md/releases)，客户端只接受该仓库对应版本和平台的安装包。原作者的 CDN 和更新公钥不参与个人版本的更新。NAS 同步服务无需修改，也不保存安装包。
+安装包来自 [yqhuang2912/quiet-md 的 GitHub Releases](https://github.com/yqhuang2912/quiet-md/releases)，更新清单保存在同一仓库独立的 `updates` 分支，通过 raw.githubusercontent.com 读取。客户端只接受该仓库对应版本和平台的安装包。原作者的 CDN 和更新公钥不参与个人版本的更新。NAS 同步服务无需修改，也不保存安装包。
 
 客户端启动 10 秒后检查一次，之后每 12 小时检查；也可在「设置 → 关于」手动检查。自动检查可以在「设置 → 通用」关闭。发现新版本后，由用户选择下载和重启安装，退出前仍检查笔记是否保存。没有公开 Release 或对应平台的清单时，显示「暂无已发布更新」。
 
 ## 第一次安装
+
+0.2.0 的清单地址固定在 Release 附件内，迁移后需要手动安装一次 0.2.1 或更高版本。新版会读取独立更新分支，之后恢复应用内更新。笔记和 NAS 配置不受更新清单迁移影响。自定义笔记库位置见[文档库位置](LIBRARY_LOCATION.md)。
 
 Windows 从个人 Release 下载 `quiet-md-<版本>-windows-x64-setup.exe` 并安装一次；以后即可在应用中更新。旧的开发用单文件 EXE 不具备安装信息，需要手动完成这次安装。个人安装包使用独立 AppId、安装目录 `Programs/MyNote` 和快捷方式「Quiet.md MyNote」。笔记仍使用现有 Quiet.md 文档库，已有 NAS 同步配置不变。
 
@@ -12,7 +14,9 @@ macOS 只发布 Apple Silicon（M 系列）ZIP，将 `quiet.md.app` 安装到可
 
 ## 发布流程
 
-工作流为 `.github/workflows/personal-release.yml`，只构建 Windows x64 和 macOS Apple Silicon，不构建 Intel Mac。版本已为首个个人版本准备为 `0.2.0`。发布包、校验和、Minisign 签名和两个 `update-<平台>.json` 全部上传到草稿 Release 后，才将其公开并标记为 latest，防止运行中的客户端读到未上传完成的安装包。
+工作流为 `.github/workflows/personal-release.yml`，只构建 Windows x64 和 macOS Apple Silicon，不构建 Intel Mac。签名和校验和仍在构建中生成并验证；Release 只上传两个安装包。两个包上传完成并公开后，`scripts/publish-update-manifests.py` 验证对应的公开安装包及大小，再以一次 Git 提交原子更新 `updates` 分支的两份清单。草稿不会更新公开渠道，旧工作流也不能将渠道回退到更低版本。分支初次创建时只有两份清单，不含源码或密钥；更新采用快进，不强制覆盖并发发布。
+
+GitHub 自动附带的 Source code (zip) 和 Source code (tar.gz) 不属于手动上传的附件，不能通过删除 Release assets 移除；页面会显示两个安装包和两个源码下载链接。
 
 正常发布新版本：
 
@@ -30,8 +34,8 @@ macOS 只发布 Apple Silicon（M 系列）ZIP，将 `quiet.md.app` 安装到可
 清单的固定检查地址为：
 
 ```text
-https://github.com/yqhuang2912/quiet-md/releases/latest/download/update-windows-x64.json
-https://github.com/yqhuang2912/quiet-md/releases/latest/download/update-macos-arm64.json
+https://raw.githubusercontent.com/yqhuang2912/quiet-md/updates/update-windows-x64.json
+https://raw.githubusercontent.com/yqhuang2912/quiet-md/updates/update-macos-arm64.json
 ```
 
 每份清单中的安装包 URL 固定到 `mynote-v<版本>`，包含版本、大小和完整 Minisign 签名。客户端下载后校验大小、签名、公钥和签名中的文件名，拒绝损坏、冒充版本或来自其他仓库的更新包。

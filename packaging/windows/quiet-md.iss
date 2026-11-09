@@ -1,5 +1,5 @@
-#ifndef AppVersion
-  #define AppVersion "0.2.0"
+﻿#ifndef AppVersion
+#define AppVersion "0.2.1"
 #endif
 #ifndef AppSource
   #define AppSource "..\..\target\release"
@@ -78,6 +78,15 @@ Filename: "{app}\quiet_md.exe"; Description: "Launch Quiet.md"; Flags: nowait po
 Filename: "{app}\quiet_md.exe"; Flags: nowait; Check: IsUpdate
 
 [Code]
+var
+  LibraryPage: TInputDirWizardPage;
+  AskLibrary: Boolean;
+
+function LibraryConfig: String;
+begin
+  Result := ExpandConstant('{localappdata}\io.github.yqhuang2912.mynote\library.json');
+end;
+
 function IsUpdate: Boolean;
 begin
   Result := ExpandConstant('{param:UPDATE|0}') = '1';
@@ -86,4 +95,86 @@ end;
 procedure InitializeWizard;
 begin
   WizardForm.Caption := 'Quiet.md';
+  AskLibrary := not FileExists(LibraryConfig) and not WizardSilent and not IsUpdate;
+  LibraryPage := CreateInputDirPage(wpSelectDir,
+    'Choose document library / 选择文档库位置',
+    'Where should your notes and attachments be saved? / 笔记和附件保存在哪里？',
+    'This folder stores your notes, attachments and NAS sync settings. It is separate from the application folder.'#13#10 +
+    'Choose an empty folder or an existing MyNote library. Future updates keep this location.'#13#10#13#10 +
+    '请选择空文件夹或已有的文档库，后续升级会保留此位置。',
+    False, 'Quiet.md');
+  LibraryPage.Add('Document library / 文档库文件夹:');
+  LibraryPage.Values[0] := ExpandConstant('{userdocs}\Quiet.md');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = LibraryPage.ID) and not AskLibrary;
+end;
+
+function HasContents(const Folder: String): Boolean;
+var
+  Entry: TFindRec;
+begin
+  Result := False;
+  if FindFirst(AddBackslash(Folder) + '*', Entry) then begin
+    try
+      repeat
+        if (Entry.Name <> '.') and (Entry.Name <> '..') then begin
+          Result := True;
+          Break;
+        end;
+      until not FindNext(Entry);
+    finally
+      FindClose(Entry);
+    end;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Folder: String;
+begin
+  Result := True;
+  if (CurPageID <> LibraryPage.ID) or not AskLibrary then Exit;
+  Folder := RemoveBackslashUnlessRoot(Trim(LibraryPage.Values[0]));
+  if ExtractFileDrive(Folder) <> '' then Folder := ExpandFileName(Folder);
+  if (ExtractFileDrive(Folder) = '') or (Length(Folder) <= Length(ExtractFileDrive(Folder)) + 1) then begin
+    MsgBox('Choose a folder, not a drive root. / 请选择文件夹，不能使用磁盘根目录。', mbError, MB_OK);
+    Result := False;
+  end else if (CompareText(AddBackslash(Folder), AddBackslash(WizardDirValue)) = 0) or
+    (Pos(Lowercase(AddBackslash(WizardDirValue)), Lowercase(AddBackslash(Folder))) = 1) then begin
+    MsgBox('Save documents separately from the application folder. / 文档库不能放在程序安装文件夹内。', mbError, MB_OK);
+    Result := False;
+  end else if FileExists(Folder) or (DirExists(Folder) and HasContents(Folder) and
+    not (FileExists(AddBackslash(Folder) + 'format.json') and DirExists(AddBackslash(Folder) + 'docs'))) then begin
+    MsgBox('Choose an empty folder or an existing MyNote library. / 请选择空文件夹或已有的文档库。', mbError, MB_OK);
+    Result := False;
+  end;
+  if Result then LibraryPage.Values[0] := Folder;
+end;
+
+function JsonPath(Value: String): String;
+begin
+  StringChangeEx(Value, '\', '\\', True);
+  StringChangeEx(Value, '"', '\"', True);
+  Result := Value;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Config, Temp: String;
+  Lines: TArrayOfString;
+begin
+  if (CurStep <> ssPostInstall) or not AskLibrary or FileExists(LibraryConfig) then Exit;
+  Config := LibraryConfig;
+  if not ForceDirectories(ExtractFileDir(Config)) then RaiseException('Could not save the library location.');
+  Temp := GetTempFileName(ExtractFileDir(Config));
+  SetArrayLength(Lines, 1);
+  Lines[0] := '{"root":"' + JsonPath(LibraryPage.Values[0]) + '","confirmed":true,"create":true}';
+  if not SaveStringsToUTF8FileWithoutBOM(Temp, Lines, False) then RaiseException('Could not save the library location.');
+  if not RenameFile(Temp, Config) then begin
+    DeleteFile(Temp);
+    if not FileExists(Config) then RaiseException('Could not save the library location.');
+  end;
 end;

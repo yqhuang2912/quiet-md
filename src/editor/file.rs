@@ -292,7 +292,7 @@ fn file_block_from_path(p: &Path) -> Option<Block> {
         Some(Kind::Pdf | Kind::Word | Kind::Excel | Kind::Ppt) if size < DOC_PREVIEW_MAX => FileView::Preview,
         _ => FileView::Card,
     };
-    let f = FileBlock { src_kind: "path".into(), src: dest.to_string_lossy().to_string(), name, view };
+    let f = FileBlock { src_kind: "path".into(), src: crate::store::asset_source(&dest), name, view };
     Some(Block::new(BlockKind::File(f), RichText::default()))
 }
 

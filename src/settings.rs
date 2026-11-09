@@ -53,7 +53,7 @@ pub struct Preferences {
 }
 
 /// Pick the first supported system language; saved preferences still win.
-fn system_english() -> bool {
+pub(crate) fn system_english() -> bool {
     sys_locale::get_locales().find_map(|locale| {
         match locale.split(['-', '_']).next().unwrap_or("").to_ascii_lowercase().as_str() {
             "zh" => Some(false),
@@ -62,6 +62,7 @@ fn system_english() -> bool {
         }
     }).unwrap_or(true)
 }
+pub(crate) fn startup_language() { ENGLISH.store(system_english(), Ordering::Relaxed); }
 
 impl Default for Preferences {
     fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), media_style: String::new() } }
@@ -428,6 +429,30 @@ fn apply_theme(w: &mut Workspace, id: String, cx: &mut Context<Workspace>) {
 }
 
 impl Workspace {
+    fn choose_library_folder(&mut self, cx: &mut Context<Self>) {
+        use crate::store::location;
+        if location::overridden() {
+            self.show_toast_kind(ui::ToastKind::Info, tr("请先移除 QUIET_MD_HOME 环境变量，再修改文档库位置", "Remove QUIET_MD_HOME before changing the library location"), cx);
+            return;
+        }
+        let picked = crate::devtools::take_pick();
+        let prompt = picked.is_none().then(|| cx.prompt_for_paths(PathPromptOptions {
+            files: false, directories: true, multiple: false, extensions: None,
+            prompt: Some(tr("选择空的文档库文件夹", "Choose an empty library folder").into()),
+        }));
+        cx.spawn(async move |this, cx| {
+            let paths = match prompt { Some(p) => p.await.ok().and_then(Result::ok).flatten(), None => picked };
+            let Some(target) = paths.and_then(|p| p.into_iter().next()) else { return };
+            let _ = this.update(cx, |ws, cx| match location::schedule(&target) {
+                Ok(()) => {
+                    cx.refresh_windows();
+                    ws.show_toast_kind(ui::ToastKind::Info, tr("已设置新位置，点击「迁移并重启」完成切换", "New location saved; click Copy and restart to switch"), cx);
+                }
+                Err(error) => ws.show_toast_kind(ui::ToastKind::Error, &error.to_string(), cx),
+            });
+        }).detach();
+    }
+
     /// A compact theme list; applying a choice updates the page preview below.
     pub(crate) fn render_theme_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let focused = self.theme_menu.as_ref()?;
@@ -698,6 +723,7 @@ impl Workspace {
     }
 
     fn library_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::store::location;
         let root = crate::store::Store::root_dir();
         let location = if cfg!(target_os = "windows") { root.display().to_string() } else {
             dirs::home_dir().and_then(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string())
@@ -705,13 +731,32 @@ impl Workspace {
         let reveal = if cfg!(target_os = "macos") { tr("在访达中显示", "Show in Finder") } else if cfg!(target_os = "windows") {
             tr("在文件资源管理器中显示", "Show in File Explorer")
         } else { tr("在文件管理器中显示", "Show in File Manager") };
+        let pending = location::pending();
+        let busy = cx.try_global::<crate::nas_sync::Client>().is_some_and(|c| c.busy);
         div().w_full().flex().flex_col().gap(px(8.))
             .child(group(None, vec![
                 row(tr("文档库文件夹", "Documents folder"), Some(location.into()),
-                    button("reveal-library", reveal).on_click(|_, _, cx| cx.reveal_path(&crate::store::Store::root_dir()))).into_any_element(),
+                    div().flex().gap(px(8.))
+                        .child(button("change-library", tr("更改位置…", "Change location…")).on_click(cx.listener(|ws, _, _, cx| ws.choose_library_folder(cx))))
+                        .child(button("reveal-library", reveal).on_click(|_, _, cx| cx.reveal_path(&crate::store::Store::root_dir())))).into_any_element(),
                 row(tr("回收站", "Trash"), Some(if english() { format!("Deleted documents are kept for {} days.", crate::store::TRASH_DAYS) } else { format!("删除的文档保留 {} 天后自动清除。", crate::store::TRASH_DAYS) }.into()),
                     button("open-trash", tr("打开", "Open")).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Trash, cx)))).into_any_element(),
             ]))
+            .when_some(pending, |d, target| d.child(group(None, vec![
+                row(tr("重启后迁移到", "Copy on restart to"), Some(target.display().to_string().into()),
+                    div().flex().gap(px(8.))
+                        .child(button("cancel-library", tr("取消更改", "Cancel change")).on_click(cx.listener(|ws, _, _, cx| {
+                            if let Err(error) = location::cancel() { ws.show_toast_kind(ui::ToastKind::Error, &error.to_string(), cx); }
+                            cx.refresh_windows();
+                        })))
+                        .child(button("restart-library", if busy { tr("等待同步完成", "Wait for sync") } else { tr("迁移并重启", "Copy and restart") })
+                            .on_click(|_, _, cx| cx.defer(crate::app::restart_for_library)))).into_any_element(),
+            ])))
+            .child(div().text_size(px(12.)).line_height(px(18.)).text_color(Theme::text_caption()).child(if location::overridden() {
+                tr("当前文档库由 QUIET_MD_HOME 环境变量指定。", "QUIET_MD_HOME currently sets the library location.")
+            } else {
+                tr("选择空文件夹，重启时复制笔记、附件、回收站、设置与 NAS 同步记录。原目录保留作为备份。迁移前请退出其他应用实例；每台设备的位置单独设置。", "Choose an empty folder. Restart copies notes, attachments, trash, settings and NAS sync state; the original folder stays as a backup. Close other app instances first. Each device keeps its own location.")
+            }))
             .into_any_element()
     }
 

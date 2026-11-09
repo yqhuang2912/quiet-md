@@ -153,6 +153,15 @@ pub fn quit(cx: &mut App) {
     }
 }
 
+/// Changing libraries waits for NAS activity and saves every open window.
+pub(crate) fn restart_for_library(cx: &mut App) {
+    if cx.try_global::<crate::nas_sync::Client>().is_some_and(|c| c.busy) { return; }
+    let ready = cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>())
+        .map(|w| w.update(cx, |ws, _, cx| ws.save_before(cx, |_, _, cx| cx.defer(restart_for_library))).unwrap_or(false))
+        .fold(true, |ready, saved| ready & saved);
+    if ready { crate::quick_note::persist(cx); cx.restart(); }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum SaveStatus {
     /// Freshly opened, nothing saved this session: show the modification time.

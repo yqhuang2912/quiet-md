@@ -147,7 +147,8 @@ jobs:
               gh release create "$tag" --draft "${create_args[@]}" --title "MyNote ${tag#mynote-v}" --generate-notes
             fi
           fi
-          gh release upload "$tag" dist/github-release/* --clobber
+          gh release upload "$tag" dist/github-release/quiet-md-*-windows-x64-setup.exe dist/github-release/quiet-md-*-macos-arm64.zip --clobber
           if [ "$PUBLISH" = true ]; then
             gh release edit "$tag" --draft=false --latest
+            python3 scripts/publish-update-manifests.py dist/github-release
           fi

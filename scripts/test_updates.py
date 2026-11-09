@@ -13,6 +13,67 @@ SPEC = importlib.util.spec_from_file_location("prepare_updates", Path(__file__).
 UPDATES = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(UPDATES)
 MINISIGN = os.environ.get("MYNOTE_MINISIGN") or shutil.which("minisign")
+PUBLISH_SPEC = importlib.util.spec_from_file_location("publish_updates", Path(__file__).with_name("publish-update-manifests.py"))
+PUBLISH = importlib.util.module_from_spec(PUBLISH_SPEC)
+PUBLISH_SPEC.loader.exec_module(PUBLISH)
+
+
+class ManifestPublication(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.assets = []
+        self.calls = []
+        for platform in UPDATES.PLATFORMS:
+            package = UPDATES.package_name("0.2.1", platform)
+            url = f"https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.1/{package}"
+            m = {"version": "0.2.1", "url": url, "size": 42, "signature": f"trusted comment: {package}\n"}
+            (self.root / f"update-{platform}.json").write_text(json.dumps(m), encoding="utf-8")
+            self.assets.append({"name": package, "size": 42, "browser_download_url": url})
+        self.head = None
+        self.previous_version = "0.2.0"
+
+    def request(self, endpoint, method="GET", payload=None, missing_ok=False):
+        self.calls.append((endpoint, method, payload))
+        if endpoint.startswith("releases/"):
+            return {"draft": False, "prerelease": False, "assets": self.assets}
+        if endpoint == "git/ref/heads/updates":
+            return {"object": {"sha": self.head}} if self.head else None
+        if endpoint.startswith("contents/"):
+            import base64
+            return {"content": base64.b64encode(json.dumps({"version": self.previous_version}).encode()).decode()}
+        return {"sha": "newcommit" if endpoint == "git/commits" else "tree"}
+
+    def test_initial_branch_contains_only_both_manifests_and_is_orphaned(self):
+        PUBLISH.publish(self.root, self.request)
+        tree = next(payload for endpoint, _, payload in self.calls if endpoint == "git/trees")
+        self.assertEqual({e["path"] for e in tree["tree"]}, {f"update-{p}.json" for p in UPDATES.PLATFORMS})
+        commit = next(payload for endpoint, _, payload in self.calls if endpoint == "git/commits")
+        self.assertEqual(commit["parents"], [])
+        self.assertEqual(self.calls[-1], ("git/refs", "POST", {"ref": "refs/heads/updates", "sha": "newcommit"}))
+
+    def test_existing_branch_advances_without_force_and_rejects_downgrade(self):
+        self.head = "oldcommit"
+        PUBLISH.publish(self.root, self.request)
+        self.assertEqual(self.calls[-1], ("git/refs/heads/updates", "PATCH", {"sha": "newcommit", "force": False}))
+        self.calls.clear()
+        self.previous_version = "0.3.0"
+        with self.assertRaisesRegex(ValueError, "newer"):
+            PUBLISH.publish(self.root, self.request)
+        self.assertTrue(all(method == "GET" for _, method, _ in self.calls))
+
+    def test_incomplete_release_and_mismatched_platforms_never_change_channel(self):
+        self.assets.pop()
+        with self.assertRaisesRegex(ValueError, "missing"):
+            PUBLISH.publish(self.root, self.request)
+        self.assertTrue(all(method == "GET" for _, method, _ in self.calls))
+        path = self.root / "update-macos-arm64.json"
+        m = json.loads(path.read_text())
+        m["version"] = "0.2.2"
+        path.write_text(json.dumps(m), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            PUBLISH.publish(self.root, self.request)
 
 
 @unittest.skipUnless(MINISIGN, "minisign is required for release-signing tests")

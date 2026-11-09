@@ -251,6 +251,7 @@ const BASE_FORMAT: u32 = 2;
 mod folders;
 
 pub mod nas_sync;
+pub mod location;
 
 #[derive(Serialize, Deserialize)]
 struct FormatMarker {
@@ -329,12 +330,18 @@ fn save_json<T: Serialize>(path: &std::path::Path, v: &T) -> Result<()> {
 
 /// Image path for an image block source (only local files are displayed).
 pub fn image_path(src: &str) -> Option<PathBuf> {
-    let p = PathBuf::from(src.strip_prefix("file://").unwrap_or(src));
+    let p = location::resolve(std::path::Path::new(src.strip_prefix("file://").unwrap_or(src)));
     if p.is_absolute() {
         return Some(p);
     }
     // Relative to the library (`assets/…`); not a URI or a cloud token.
     (!src.is_empty() && !src.contains(':') && src.contains('/')).then(|| Store::root_dir().join(p))
+}
+
+/// New library assets use portable paths for relocation and NAS sync.
+pub fn asset_source(path: &std::path::Path) -> String { asset_source_in(&Store::root_dir(), path) }
+fn asset_source_in(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 /// Export only files belonging to this library, including after symlink resolution.
@@ -343,8 +350,10 @@ pub fn export_path(src: &str) -> Option<PathBuf> {
 }
 
 pub fn export_path_in(root: &std::path::Path, src: &str) -> Option<PathBuf> {
+    let active = root == Store::root_dir();
     let root = root.canonicalize().ok()?;
-    let raw = std::path::Path::new(src.strip_prefix("file://").unwrap_or(src));
+    let raw = PathBuf::from(src.strip_prefix("file://").unwrap_or(src));
+    let raw = if active { location::resolve(&raw) } else { raw };
     let path = if raw.is_absolute() { raw.to_path_buf() } else { root.join(raw) }.canonicalize().ok()?;
     (path.starts_with(root) && path.is_file()).then_some(path)
 }
@@ -363,12 +372,9 @@ pub fn read_bounded(path: &std::path::Path, limit: u64) -> Result<Vec<u8>> {
 }
 
 impl Store {
-    /// `QUIET_MD_HOME`, else a folder of
-    /// its own in the user's Documents, where they can see and back it up.
+    /// An explicit override, the saved location, or Documents/Quiet.md.
     pub fn root_dir() -> PathBuf {
-        std::env::var_os("QUIET_MD_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| dirs::document_dir().or_else(|| dirs::home_dir().map(|h| h.join("Documents"))).unwrap_or_else(|| PathBuf::from(".")).join("Quiet.md"))
+        location::root_dir()
     }
 
     /// Where pasted / inserted images are copied to.
