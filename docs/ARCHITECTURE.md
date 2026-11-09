@@ -111,7 +111,8 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 | 模块 | 内容 |
 |---|---|
 | `main.rs` | 入口；`FDL_SCRIPT` 脚本模式（仅 `devtools` 特性）；重新导出 `fdl_core` 的模块 |
-| `guides.rs` | 文档库是空的时放入内置的「开始指南」（只放一次） |
+| `library_setup.rs` | ZIP / 便携版首次启动确认文档库位置，确认后创建空库；Windows 安装向导也可写入同一位置设置 |
+| `guides.rs` | 原版内置指南的维护与测试；个人版运行时不自动创建示例文档 |
 | `app.rs` | `Workspace`：两栏窗口、打开 / 新建 / 保存 / 删除、保存状态、提醒调度 |
 | `html.rs` / `printing.rs` / `transfer.rs` | 导出 HTML / PDF、打印、导入导出的界面 |
 | `clipboard.rs` | 系统剪贴板的 HTML 读取，以及脚本模式的模拟剪贴板 |

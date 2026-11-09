@@ -73,7 +73,7 @@
 
 You can also download from [Quiet.md](https://quiet.md/?lang=en). Every release and its SHA-256 checksums are on [GitHub Releases](https://github.com/s1dashu/quiet-md/releases).
 
-On first launch, Quiet.md puts a **Getting started** guide into an empty library — a ten-minute tour of the main features. Existing notes are never overwritten.
+This personal edition asks where to store your library during Windows installation or first launch. New libraries start empty, without guides or sample notes. Existing notes are never overwritten. See [library locations](docs/LIBRARY_LOCATION.md).
 
 The interface is available in English and Simplified Chinese.
 

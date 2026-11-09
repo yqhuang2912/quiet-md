@@ -8,6 +8,7 @@ mod shared_store;
 mod quick_note;
 mod assets;
 mod changelog;
+#[cfg(test)]
 mod guides;
 mod clipboard;
 #[cfg(feature = "devtools")]
@@ -137,17 +138,11 @@ fn start_library(scripted: bool, incoming: local_files::Incoming, cx: &mut App) 
     };
     // No single-instance guard: copies may share a library (builds tested
     // side by side). `Store` rereads an index another copy rewrote before
-    // writing its own, and `guides` seeds a new library only once.
+    // writing its own.
     let root = store::Store::root_dir();
     logging::write(&format!("library {}", root.display()));
     // A library that was here before this launch can show 更新日志.
-    let existed = guides::seeded(&root).unwrap_or(false);
-    if !scripted && let Err(err) = guides::initialize(&root) {
-        logging::fatal(&format!("无法初始化文档库 / Could not set up the library at {}", root.display()), &err);
-    }
-    if !scripted && let Err(error) = store::location::finish_setup() {
-        logging::fatal("无法保存文档库位置 / Could not save library location", &error);
-    }
+    let existed = root.join("format.json").is_file();
     editor::math::load_fonts(cx);
     editor::image::init_pictures(cx);
     input::bind_keys(cx);
@@ -163,6 +158,9 @@ fn start_library(scripted: bool, incoming: local_files::Incoming, cx: &mut App) 
     match shared_store::SharedStore::open() {
         Ok(s) => cx.set_global(s),
         Err(err) => logging::fatal("无法打开文档库 / Could not open the library", &err),
+    }
+    if !scripted && let Err(error) = store::location::finish_setup() {
+        logging::fatal("无法保存文档库位置 / Could not save library location", &error);
     }
     let quick_enabled = !scripted;
     if quick_enabled { quick_note::install(cx); }

@@ -75,7 +75,7 @@
 
 也可以在官网 [Quiet.md](https://quiet.md) 下载。所有版本和 SHA-256 校验值见 [GitHub Releases](https://github.com/s1dashu/quiet-md/releases)。
 
-首次启动会在空文档库里放一套「开始指南」，十分钟带你过一遍主要功能；已有的笔记不会被覆盖。
+个人版会在 Windows 安装时或首次启动时询问文档库保存位置。新文档库保持空白，不自动创建指南或示例，已有笔记不会被覆盖。详见[自定义文档库文件夹](docs/LIBRARY_LOCATION.md)。
 
 ## 性能
 
