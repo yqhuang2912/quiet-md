@@ -57,6 +57,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate release tag
         run: python scripts/check-release-tag.py
+      - name: Validate installer script before compiling Rust
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = @("${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe", "$env:ProgramFiles/Inno Setup 7/ISCC.exe", "${env:ProgramFiles(x86)}/Inno Setup 7/ISCC.exe") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (!$iscc) { throw 'Inno Setup compiler was not found on the runner' }
+          $probe = Join-Path $env:RUNNER_TEMP 'installer-script-check'
+          New-Item -ItemType Directory -Path $probe -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $probe 'quiet_md.exe') -Value 'Compile-only placeholder' -Encoding Ascii
+          Set-Content -LiteralPath (Join-Path $probe 'vcruntime140.dll') -Value 'Compile-only placeholder' -Encoding Ascii
+          & $iscc /Q "/DAppSource=$probe" "/O$probe" packaging/windows/quiet-md.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer script validation failed' }
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true

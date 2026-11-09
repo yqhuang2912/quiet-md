@@ -163,16 +163,16 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Config, Temp: String;
-  Lines: TArrayOfString;
+  Config, Temp, Contents: String;
 begin
   if (CurStep <> ssPostInstall) or not AskLibrary or FileExists(LibraryConfig) then Exit;
   Config := LibraryConfig;
   if not ForceDirectories(ExtractFileDir(Config)) then RaiseException('Could not save the library location.');
-  Temp := GetTempFileName(ExtractFileDir(Config));
-  SetArrayLength(Lines, 1);
-  Lines[0] := '{"root":"' + JsonPath(LibraryPage.Values[0]) + '","confirmed":true,"create":true}';
-  if not SaveStringsToUTF8FileWithoutBOM(Temp, Lines, False) then RaiseException('Could not save the library location.');
+  repeat
+    Temp := Config + '.install-' + IntToStr(Random(2147483647)) + '.tmp';
+  until not FileExists(Temp);
+  Contents := '{"root":"' + JsonPath(LibraryPage.Values[0]) + '","confirmed":true,"create":true}';
+  if not SaveStringToFile(Temp, Utf8Encode(Contents), False) then RaiseException('Could not save the library location.');
   if not RenameFile(Temp, Config) then begin
     DeleteFile(Temp);
     if not FileExists(Config) then RaiseException('Could not save the library location.');
