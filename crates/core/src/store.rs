@@ -250,6 +250,8 @@ const BASE_FORMAT: u32 = 2;
 #[path = "folders.rs"]
 mod folders;
 
+pub mod nas_sync;
+
 #[derive(Serialize, Deserialize)]
 struct FormatMarker {
     format: u32,

@@ -43,4 +43,5 @@ impl SharedStore {
     pub fn front_matter_of(&self, id: &str) -> String { self.0.borrow().front_matter_of(id) }
     pub fn open_local(&mut self, path: &std::path::Path) -> Result<String> { self.0.borrow_mut().open_local(path) }
     pub fn local_path(&self, id: &str) -> Option<std::path::PathBuf> { self.0.borrow().local_path(id) }
+    pub fn apply_nas_sync(&mut self, pending: nas_sync::Pending) -> Result<nas_sync::Report> { pending.apply(&mut self.0.borrow_mut()) }
 }

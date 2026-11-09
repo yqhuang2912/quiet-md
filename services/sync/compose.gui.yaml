@@ -1,0 +1,22 @@
+# For NAS project managers that cannot build a Dockerfile. Keep this file
+# beside server.py; set SYNC_TOKEN in the project environment or .env.
+services:
+  sync:
+    image: python:3.13-slim
+    restart: unless-stopped
+    command: ["python", "/app/server.py"]
+    ports:
+      - "8787:8787"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SYNC_TOKEN: ${SYNC_TOKEN:?Set SYNC_TOKEN in .env}
+      SYNC_DATA: /data
+    volumes:
+      - ./server.py:/app/server.py:ro
+      - sync-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  sync-data:

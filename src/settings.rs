@@ -185,7 +185,7 @@ pub(crate) fn watch_themes(cx: &mut Context<Workspace>) {
 // ---- the view
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Page { #[default] General, Appearance, Shortcuts, Library, About }
+pub enum Page { #[default] General, Appearance, Shortcuts, Library, Sync, About }
 
 impl Page {
     fn title(self) -> &'static str {
@@ -194,6 +194,7 @@ impl Page {
             Page::Appearance => tr("外观", "Appearance"),
             Page::Shortcuts => tr("快捷键", "Shortcuts"),
             Page::Library => tr("文档库", "Documents"),
+            Page::Sync => tr("同步", "Sync"),
             Page::About => tr("关于", "About"),
         }
     }
@@ -203,6 +204,7 @@ impl Page {
             Page::Appearance => "palette",
             Page::Shortcuts => "keyboard",
             Page::Library => "storage",
+            Page::Sync => "storage",
             Page::About => "info",
         }
     }
@@ -210,7 +212,7 @@ impl Page {
 
 /// The sidebar list, one evenly spaced run (six rows need no unlabelled
 /// groups); `None` is 回收站 (its own view, shown with this sidebar).
-const NAV: [Option<Page>; 6] = [Some(Page::General), Some(Page::Appearance), Some(Page::Shortcuts), Some(Page::Library), None, Some(Page::About)];
+const NAV: [Option<Page>; 7] = [Some(Page::General), Some(Page::Appearance), Some(Page::Shortcuts), Some(Page::Library), Some(Page::Sync), None, Some(Page::About)];
 
 // ---- controls (switch on the accent, 30pt buttons, grouped rows)
 
@@ -597,6 +599,7 @@ impl Workspace {
             Page::Appearance => self.appearance_page(cx),
             Page::Shortcuts => self.shortcut_settings(cx),
             Page::Library => self.library_page(cx),
+            Page::Sync => self.nas_sync_page(cx),
             Page::About => self.about_page(cx),
         };
         div().flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body()).text_color(Theme::text()).font_family(theme::UI_FONT)
@@ -699,6 +702,30 @@ impl Workspace {
                 row(tr("回收站", "Trash"), Some(if english() { format!("Deleted documents are kept for {} days.", crate::store::TRASH_DAYS) } else { format!("删除的文档保留 {} 天后自动清除。", crate::store::TRASH_DAYS) }.into()),
                     button("open-trash", tr("打开", "Open")).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Trash, cx)))).into_any_element(),
             ]))
+            .into_any_element()
+    }
+
+    fn nas_sync_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let client = cx.global::<crate::nas_sync::Client>();
+        let (enabled, busy, status) = (client.config.enabled, client.busy, client.status.clone());
+        let field = |entity: &Entity<crate::input::TextField>| div().w(px(300.)).min_h(px(30.)).px(px(8.)).py(px(5.)).rounded(px(6.))
+            .border_1().border_color(Theme::line_border()).bg(Theme::bg_body()).child(entity.clone());
+        div().w_full().flex().flex_col().gap(px(16.))
+            .child(group(None, vec![
+                row(tr("NAS 服务器", "NAS server"), desc(tr("填写 Tailscale 地址，包含 http:// 或 https://", "Enter a Tailscale URL, including http:// or https://")), field(&self.nas_form.url)).into_any_element(),
+                row(tr("同步文档库", "Sync library"), desc(tr("所有设备填写同一个名称", "Use the same name on every device")), field(&self.nas_form.library)).into_any_element(),
+                row(tr("访问令牌", "Access token"), desc(tr("留空保留已保存的令牌", "Leave blank to keep the saved token")), field(&self.nas_form.token)).into_any_element(),
+                row(tr("自动同步", "Automatic sync"), desc(tr("每 30 秒同步，断网后自动重试", "Sync every 30 seconds; retry after reconnecting")),
+                    switch("nas-enabled", enabled).on_click(cx.listener(|_, _, _, cx| cx.defer(crate::nas_sync::toggle)))).into_any_element(),
+                row(tr("同步状态", "Sync status"), Some(status.into()),
+                    div().flex().gap(px(8.))
+                        .child(button("nas-save", tr("保存并同步", "Save and sync")).on_click(cx.listener(|w, _, _, cx| w.save_nas_config(cx))))
+                        .child(button("nas-now", if busy { tr("同步中…", "Syncing…") } else { tr("立即同步", "Sync now") })
+                            .on_click(cx.listener(|_, _, _, cx| cx.defer(crate::nas_sync::start))))).into_any_element(),
+            ]))
+            .child(div().text_size(px(12.)).line_height(px(18.)).text_color(Theme::text_caption()).child(tr(
+                "同步文档库内的笔记、文件夹、收藏、回收站和附件；本机外部文件与窗口设置保留在当前设备。同时编辑同一篇时保留冲突副本。",
+                "Sync library notes, folders, favorites, trash and attachments. External files and window settings stay on this device. Concurrent edits keep a conflict copy.")))
             .into_any_element()
     }
 

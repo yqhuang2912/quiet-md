@@ -1,0 +1,16 @@
+services:
+  sync:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      SYNC_TOKEN: ${SYNC_TOKEN:?Set SYNC_TOKEN in .env}
+    volumes:
+      - sync-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  sync-data:

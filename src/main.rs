@@ -58,6 +58,7 @@ mod trash;
 mod tree;
 mod ui;
 mod update;
+mod nas_sync;
 
 use fdl_core::{docxml, lang, markdown, model, palette, paste, store, time};
 
@@ -152,6 +153,7 @@ fn main() {
         if quick_enabled { quick_note::install(cx); }
         app::set_menus(cx);
         update::init(cx);
+        nas_sync::init(cx);
         open_main_window(scripted, cx);
         incoming.deliver(cx);
         cx.on_window_closed(move |cx| {

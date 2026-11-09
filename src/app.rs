@@ -226,6 +226,7 @@ pub struct Workspace {
     pub theme_anchor: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// 快捷键's filter field.
     pub settings_filter: Entity<TextField>,
+    pub nas_form: crate::nas_sync::Form,
     native_sidebar: crate::native_header::NativeSidebar,
     pub store: SharedStore,
     pub entries: Vec<Entry>,
@@ -411,6 +412,7 @@ impl Workspace {
             theme_menu: None,
             theme_anchor: Default::default(),
             settings_filter,
+            nas_form: crate::nas_sync::Form::new(cx),
             store,
             entries,
             current: None,
@@ -961,6 +963,30 @@ impl Workspace {
         self.dirty_since = self.unsaved.then(Instant::now);
         cx.notify();
         !self.unsaved
+    }
+
+    pub(crate) fn refresh_after_nas_sync(&mut self, cx: &mut Context<Self>) {
+        self.entries = self.store.list();
+        self.sort();
+        if let Some(id) = self.current.clone() {
+            if self.entries.iter().any(|e| e.id == id) {
+                if let Ok(doc) = self.store.load_for_edit(&id, false) && let Some(editor) = &self.editor {
+                    let changed = crate::docxml::serialize(&editor.read(cx).core.doc) != crate::docxml::serialize(&doc);
+                    if changed { editor.update(cx, |e, cx| e.receive_document(&crate::editor::core::Core::new(doc), cx)); }
+                    if let Some(meta) = self.entries.iter().find(|e| e.id == id).map(|e| e.meta.clone()) {
+                        editor.update(cx, |e, cx| { e.modified = meta.modified; cx.notify(); });
+                    }
+                }
+            } else {
+                self.current = None;
+                self.editor = None;
+                if self.view == View::Doc { self.view = View::Home; }
+            }
+        }
+        if self.view == View::Trash { self.trash = self.store.list_trash(); }
+        self.sync_sub_pages(cx);
+        self.sync_links(cx);
+        cx.notify();
     }
 
     /// Save the open document before something replaces it. When the save

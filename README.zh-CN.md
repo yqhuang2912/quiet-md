@@ -1,5 +1,7 @@
 <h1 align="center">Quiet.md</h1>
 
+> 本地个人版已加入可选的 NAS + Tailscale 桌面同步，部署和使用见 [NAS 同步说明](docs/NAS_SYNC.md)。
+
 <p align="center">
   <b>一个又快又安静的本地笔记应用。</b><br>
   Rust + GPUI 原生绘制，笔记全部存在你的电脑上，兼容飞书文档的 DocxXML 格式。
