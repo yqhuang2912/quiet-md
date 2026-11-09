@@ -1638,16 +1638,7 @@ impl Editor {
         }
         if self.core.in_block_mode() {
             self.core.enter_from_block_sel();
-        } else if self.core.is_code(self.core.sel.head.block) && self.core.sel.is_collapsed() {
-            // Newline keeps the current line's indentation.
-            let h = self.core.sel.head;
-            let text = self.core.text_of(h.block).map(|t| t.text.clone()).unwrap_or_default();
-            let line_start = text[..h.offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let indent: String = text[line_start..h.offset].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-            self.core.break_coalescing();
-            self.core.insert_text(&format!("\n{indent}"));
-            self.core.break_coalescing();
-        } else if !self.core.markdown_enter_shortcut() {
+        } else if self.core.is_code(self.core.sel.head.block) || !self.core.markdown_enter_shortcut() {
             self.core.enter();
         }
         self.changed(window, cx);

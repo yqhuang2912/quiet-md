@@ -737,7 +737,8 @@ impl R<'_> {
 
         let id = b.id;
         let g = SharedString::from(format!("code-{}", id.0));
-        let st = theme::style();
+        let reading = crate::media_theme::active().is_some();
+        let st = crate::media_theme::code_style();
         let (code_size, code_line, radius) = (st.num("pre.size"), st.num("pre.line"), st.num("pre.radius"));
         let gutter_w = if st.flag("pre.numbers") { GUTTER_W } else { 0. };
         // SF Mono 13 on a 20pt line.
@@ -745,7 +746,7 @@ impl R<'_> {
             size: code_size,
             line_height: code_line,
             weight: FontWeight::NORMAL,
-            color: Theme::code_text(),
+            color: st.color("pre.color").unwrap_or_else(Theme::code_text),
             mono: true,
             strike_all: false,
             wrap,
@@ -894,7 +895,7 @@ impl R<'_> {
         } else if selected {
             Theme::primary_500()
         } else {
-            Theme::code_border()
+            st.color("pre.border").unwrap_or_else(Theme::code_border)
         };
         // The code block: #FBFBFB in a 1pt rim, radius 6, a #F8F8F8 line-number
         // gutter split off by a hairline.
@@ -904,7 +905,7 @@ impl R<'_> {
             .rounded(px(radius))
             .border_1()
             .border_color(border)
-            .when(!menu_on, |d| d.bg(Theme::code_bg()))
+            .when(!menu_on, |d| d.bg(st.color("pre.bg").unwrap_or_else(Theme::code_bg)))
             .when(menu_on, |d| {
                 d.child(outer_ring(Theme::code_hover_ring()))
             })
@@ -917,9 +918,9 @@ impl R<'_> {
                         .left_0()
                         .w(px(gutter_w))
                         .rounded_l(px(radius))
-                        .bg(Theme::code_gutter())
+                        .bg(st.color("pre.gutter").unwrap_or_else(Theme::code_gutter))
                         .border_r_1()
-                        .border_color(Theme::code_gutter_line()),
+                        .border_color(if reading { gpui::transparent_black() } else { Theme::code_gutter_line() }),
                 )
             })
             // Pointer over the block: the rim darkens a step.
@@ -1000,10 +1001,10 @@ impl R<'_> {
                                 .flex()
                                 .flex_col()
                                 .items_end()
-                                .font_family(theme::MONO_FONT)
-                                .text_size(px(12.))
+                                .font_family(if reading { crate::media_theme::mono_font() } else { theme::MONO_FONT })
+                                .text_size(px(if reading { code_size } else { 12. }))
                                 .line_height(px(code_line))
-                                .text_color(Theme::code_line_number())
+                                .text_color(st.color("pre.number-color").unwrap_or_else(Theme::code_line_number))
                                 .children(
                                     rows_per_line
                                         .iter()
@@ -1986,11 +1987,14 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
 
         let id = b.id;
         let g = SharedString::from(format!("code-{}", id.0));
+        let media = crate::media_theme::active();
+        let code_size = media.map_or(14., |s| s.num("pre.size"));
+        let code_line = media.map_or(22., |s| s.num("pre.line"));
         let spec = TextSpec {
-            size: 14.,
-            line_height: 22.,
+            size: code_size,
+            line_height: code_line,
             weight: FontWeight::NORMAL,
-            color: Theme::text_code(),
+            color: media.and_then(|s| s.color("pre.color")).unwrap_or_else(Theme::text_code),
             mono: true,
             strike_all: false,
             wrap,
@@ -2138,15 +2142,15 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
         } else if selected {
             Theme::primary_500()
         } else {
-            Theme::line_border()
+            media.and_then(|s| s.color("pre.border")).unwrap_or_else(Theme::line_border)
         };
         div()
             .relative()
             .group(g.clone())
-            .rounded(px(8.))
+            .rounded(px(media.map_or(8., |s| s.num("pre.radius"))))
             .border_1()
             .border_color(border)
-            .when(!menu_on, |d| d.bg(Theme::bg_overlay()))
+            .when(!menu_on, |d| d.bg(media.and_then(|s| s.color("pre.bg")).unwrap_or_else(Theme::bg_overlay)))
             .when(menu_on, |d| {
                 d.child(outer_ring(Theme::code_hover_ring()))
             })
@@ -2215,8 +2219,8 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                 d.child(
                     div()
                         .pt(px(40.))
-                        .pb(px(26.))
-                        .pr(px(20.))
+                        .pb(px(if media.is_some() { 14. } else { 26. }))
+                        .pr(px(if media.is_some() { 14. } else { 20. }))
                         .flex()
                         .child(
                             // Number box spans x 0..36 of the outer block, text starts at 60.
@@ -2227,15 +2231,15 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                                 .flex()
                                 .flex_col()
                                 .items_end()
-                                .font_family(theme::MONO_FONT)
-                                .text_size(px(14.))
-                                .line_height(px(22.))
-                                .text_color(Theme::text_caption())
+                                .font_family(if media.is_some() { crate::media_theme::mono_font() } else { theme::MONO_FONT })
+                                .text_size(px(code_size))
+                                .line_height(px(code_line))
+                                .text_color(media.and_then(|s| s.color("pre.number-color")).unwrap_or_else(Theme::text_caption))
                                 .children(
                                     rows_per_line
                                         .iter()
                                         .enumerate()
-                                        .map(|(i, n)| div().h(px(22. * *n as f32)).child(format!("{}", i + 1))),
+                                        .map(|(i, n)| div().h(px(code_line * *n as f32)).child(format!("{}", i + 1))),
                                 ),
                         )
                         .child(div().flex_1().min_w_0().overflow_hidden().child(el)),

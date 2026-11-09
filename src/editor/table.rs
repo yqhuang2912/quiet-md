@@ -770,6 +770,7 @@ impl R<'_> {
         // more to bleed into, the clip sits on the page margin.
         let (bl, br) = if root { ed.bleed() } else { (0., 0.) };
         let (reach, reach_r) = (bl.max(26.), br.max(12.));
+        let centered = crate::settings::manbianliang();
         // Where the cells are drawn this frame (scroll included): a side the
         // clip cuts gets a closing line and a shade inward, as in Feishu
         // (measured there: a border-coloured line, then black 5% → 0 over 10px).
@@ -808,10 +809,14 @@ impl R<'_> {
                             .w_full()
                             .pl(px(reach - BAR))
                             .pt(px(16.))
-                            .pr(px(reach_r - br))
+                            .pr(px(if centered { reach_r } else { reach_r - br }))
                             .pb(px(12.))
                             .overflow_x_scroll()
-                            .child(grid),
+                            // Auto margins centre a fitting table in the text
+                            // column (excluding the bars); oversized tables
+                            // keep their left edge and horizontal scrolling.
+                            .when(centered, |d| d.flex().items_start())
+                            .child(grid.when(centered, |d| d.flex_none().mx_auto())),
                     )
                     .child(edges.absolute().top_0().left_0().size_full()),
             )

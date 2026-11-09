@@ -1,17 +1,17 @@
 #ifndef AppVersion
-  #define AppVersion "0.1.9"
+  #define AppVersion "0.2.0"
 #endif
 #ifndef AppSource
   #define AppSource "..\..\target\release"
 #endif
 
 [Setup]
-AppId={{59DC98EE-A136-40C9-A7BD-EB0CC50E37C2}
-AppName=Quiet.md
+AppId={{0993BAD8-6D4D-508A-905B-AC909F1563DE}
+AppName=Quiet.md MyNote
 AppVersion={#AppVersion}
-AppPublisher=Quiet.md
-AppPublisherURL=https://github.com/s1dashu/quiet-md
-DefaultDirName={localappdata}\Programs\quiet.md
+AppPublisher=yqhuang2912
+AppPublisherURL=https://github.com/yqhuang2912/quiet-md
+DefaultDirName={localappdata}\Programs\MyNote
 DisableDirPage=no
 DisableProgramGroupPage=yes
 DisableWelcomePage=yes
@@ -59,16 +59,16 @@ Source: "..\..\LICENSE"; DestDir: "{app}"
 Source: "..\..\THIRD_PARTY.md"; DestDir: "{app}"
 
 [Icons]
-Name: "{userprograms}\Quiet.md"; Filename: "{app}\quiet_md.exe"; WorkingDir: "{app}"
-Name: "{userdesktop}\Quiet.md"; Filename: "{app}\quiet_md.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{userprograms}\Quiet.md MyNote"; Filename: "{app}\quiet_md.exe"; WorkingDir: "{app}"
+Name: "{userdesktop}\Quiet.md MyNote"; Filename: "{app}\quiet_md.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 ; "Open with" for Markdown files (not the default app): they are edited in place.
 [Registry]
-Root: HKA; Subkey: "Software\Classes\QuietMd.Markdown"; ValueType: string; ValueName: ""; ValueData: "Markdown"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\QuietMd.Markdown\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\quiet_md.exe,0"
-Root: HKA; Subkey: "Software\Classes\QuietMd.Markdown\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\quiet_md.exe"" ""%1"""
-Root: HKA; Subkey: "Software\Classes\.md\OpenWithProgids"; ValueType: string; ValueName: "QuietMd.Markdown"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKA; Subkey: "Software\Classes\.markdown\OpenWithProgids"; ValueType: string; ValueName: "QuietMd.Markdown"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\MyNote.Markdown"; ValueType: string; ValueName: ""; ValueData: "Markdown"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\MyNote.Markdown\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\quiet_md.exe,0"
+Root: HKA; Subkey: "Software\Classes\MyNote.Markdown\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\quiet_md.exe"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.md\OpenWithProgids"; ValueType: string; ValueName: "MyNote.Markdown"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.markdown\OpenWithProgids"; ValueType: string; ValueName: "MyNote.Markdown"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\quiet_md.exe\SupportedTypes"; ValueType: string; ValueName: ".md"; ValueData: ""; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\quiet_md.exe\SupportedTypes"; ValueType: string; ValueName: ".markdown"; ValueData: ""
 

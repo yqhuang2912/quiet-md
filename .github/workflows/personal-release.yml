@@ -1,0 +1,134 @@
+name: Personal release
+
+on:
+  push:
+    tags: ['mynote-v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after building and signing (otherwise leave a draft)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    if: github.repository == 'yqhuang2912/quiet-md'
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      SIGNING_IDENTITY: '-'
+      MYNOTE_RELEASE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate release tag
+        run: python3 scripts/check-release-tag.py
+      - run: rustup target add x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Tests and clippy
+        run: python3 scripts/check.py
+      - name: Package Apple Silicon
+        run: scripts/release.sh
+      - name: Package Intel
+        env:
+          MACOS_TARGET: x86_64-apple-darwin
+        run: scripts/release.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mynote-macos-packages
+          path: |
+            dist-release.*/quiet-md-*-macos-*.zip
+            dist-release.*/quiet-md-*-macos-*.zip.sha256
+          if-no-files-found: error
+
+  windows:
+    if: github.repository == 'yqhuang2912/quiet-md'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate release tag
+        run: python scripts/check-release-tag.py
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Check and package Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools were not found' }
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          & python scripts/check.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows checks failed' }
+          $iscc = @("${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe", "$env:ProgramFiles/Inno Setup 7/ISCC.exe", "${env:ProgramFiles(x86)}/Inno Setup 7/ISCC.exe") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (!$iscc) { throw 'Inno Setup compiler was not found on the runner' }
+          & scripts/package-windows.ps1 -Iscc $iscc
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mynote-windows-packages
+          path: |
+            dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe
+            dist/windows/unsigned/quiet-md-*-windows-x64-setup.exe.sha256
+          if-no-files-found: error
+
+  release:
+    needs: [macos, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: yqhuang2912/quiet-md
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: mynote-*-packages
+          path: dist/release-input
+          merge-multiple: true
+      - name: Install Minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+      - name: Verify signing and manifest generation
+        run: python3 -m unittest discover -s scripts -p test_updates.py -v
+      - name: Sign and verify all packages
+        env:
+          MYNOTE_UPDATE_SECRET_KEY: ${{ secrets.MYNOTE_UPDATE_SECRET_KEY }}
+        run: |
+          test -n "$MYNOTE_UPDATE_SECRET_KEY" || { echo 'Configure MYNOTE_UPDATE_SECRET_KEY before releasing'; exit 1; }
+          key="$RUNNER_TEMP/mynote-update.key"
+          trap 'rm -f "$key"' EXIT
+          umask 077
+          printf '%s\n' "$MYNOTE_UPDATE_SECRET_KEY" > "$key"
+          python3 scripts/prepare-updates.py dist/release-input --key "$key"
+      - name: Upload draft, then publish complete assets
+        env:
+          PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+        run: |
+          tag=$(python3 scripts/check-release-tag.py)
+          if gh api "repos/$GH_REPO/releases/tags/$tag" > "$RUNNER_TEMP/mynote-release.json" 2>/dev/null; then
+            target=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["draft"], "Refusing to overwrite a published release"; print(r["target_commitish"])' "$RUNNER_TEMP/mynote-release.json")
+            commit=$(gh api "repos/$GH_REPO/commits/$target" --jq .sha)
+            test "$commit" = "$GITHUB_SHA" || { echo 'Draft belongs to a different source commit; use a new version'; exit 1; }
+          else
+            notes="docs/releases/${tag#mynote-v}.md"
+            if [ -f "$notes" ]; then
+              gh release create "$tag" --draft --target "$GITHUB_SHA" --title "MyNote ${tag#mynote-v}" --notes-file "$notes"
+            else
+              gh release create "$tag" --draft --target "$GITHUB_SHA" --title "MyNote ${tag#mynote-v}" --generate-notes
+            fi
+          fi
+          gh release upload "$tag" dist/github-release/* --clobber
+          if [ "$PUBLISH" = true ]; then
+            gh release edit "$tag" --draft=false --latest
+          fi

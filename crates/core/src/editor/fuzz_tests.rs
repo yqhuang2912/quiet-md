@@ -21,6 +21,8 @@ const SEED_DOC: &str = r#"<title>随机 <b>编辑</b></title>
 <pre lang="rust"><code>fn main() {
     let s = "é";
 }</code></pre>
+<pre lang="python"><code>if 名称:
+    print("值")</code></pre>
 <hr/>
 <callout emoji="💡"><p>提示</p><ul><li>提示列表</li></ul></callout>
 <grid><column width-ratio="0.5"><p>左</p></column><column width-ratio="0.5"><p>右</p><p>右二</p></column></grid>
@@ -30,7 +32,7 @@ b</code></pre></td></tr></tbody></table>
 <p></p>
 "#;
 
-const TEXTS: &[&str] = &["a", "中文", "😀", " ", "ab cd", "é", "👍🏽", "x"];
+const TEXTS: &[&str] = &["a", "中文", "😀", " ", "ab cd", "é", "👍🏽", "x", "{", "}", "[", ":", "\"", "#"];
 const PASTES: &[&str] = &["一\n二", "a\n\nb\nc", "\n", "😀\n中", "line"];
 
 struct Rng(u64);

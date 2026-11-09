@@ -2,6 +2,7 @@
 //! [`core::Core`].
 
 pub mod core;
+mod code_indent;
 #[cfg(test)]
 mod fuzz_tests;
 pub mod table_ops;

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build, sign, notarize and package this checkout; never launches the app.
 # MACOS_TARGET=x86_64-apple-darwin cross-compiles Intel on Apple Silicon.
-# SIGNING_IDENTITY=- creates an ad-hoc signed, unnotarized CI package only.
+# SIGNING_IDENTITY=- creates an ad-hoc signed, unnotarized CI package.
+# MYNOTE_RELEASE=1 gives personal Minisign-authenticated packages release names.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 : "${SIGNING_IDENTITY:?Set SIGNING_IDENTITY to your Developer ID Application identity}"
@@ -43,7 +44,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
 <key>CFBundleName</key><string>Quiet.md</string>
 <key>CFBundleDisplayName</key><string>Quiet.md</string>
-<key>CFBundleIdentifier</key><string>com.s1dashu.quietmd</string>
+<key>CFBundleIdentifier</key><string>io.github.yqhuang2912.mynote</string>
 <key>CFBundleExecutable</key><string>quiet_md</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
@@ -70,8 +71,12 @@ fi
 codesign --verify --deep --strict --verbose=2 "$app"
 suffix=
 if [ "$SIGNING_IDENTITY" = - ]; then
-  suffix=-unsigned
-  echo "CI package only: ad-hoc signed, without notarization; do not publish."
+  if [ "${MYNOTE_RELEASE:-}" = 1 ]; then
+    echo "Personal release: ad-hoc signed; Minisign authenticates updates."
+  else
+    suffix=-unsigned
+    echo "CI package only: ad-hoc signed, without notarization."
+  fi
 else
   ditto -c -k --keepParent "$app" "$out/notarization.zip"
   xcrun notarytool submit "$out/notarization.zip" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json > "$out/notarization.json"

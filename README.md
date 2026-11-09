@@ -1,3 +1,5 @@
+> Personal fork: Windows/macOS packages and updates use [yqhuang2912/quiet-md Releases](https://github.com/yqhuang2912/quiet-md/releases). See [personal updates](docs/PERSONAL_UPDATES.md) and [NAS sync](docs/NAS_SYNC.md) for setup.
+
 <h1 align="center">Quiet.md</h1>
 
 <p align="center">
@@ -19,9 +21,9 @@
 </p>
 
 <p align="center">
-  <a href="https://download.quiet.md/latest/quiet-md-macos-arm64.zip"><img src="docs/images/download-macos.svg" height="56" alt="Download for macOS"></a>
+  <a href="https://github.com/yqhuang2912/quiet-md/releases/latest"><img src="docs/images/download-macos.svg" height="56" alt="Download for macOS"></a>
   &nbsp;
-  <a href="https://download.quiet.md/latest/quiet-md-windows-x64-setup.exe"><img src="docs/images/download-windows.svg" height="56" alt="Download for Windows"></a>
+  <a href="https://github.com/yqhuang2912/quiet-md/releases/latest"><img src="docs/images/download-windows.svg" height="56" alt="Download for Windows"></a>
   &nbsp;
   <a href="https://download.quiet.md/latest/quiet-md-x86_64.AppImage"><img src="docs/images/download-linux.svg" height="56" alt="Download for Linux"></a>
 </p>
@@ -52,19 +54,19 @@
 ## Download
 
 <p align="center">
-  <a href="https://download.quiet.md/latest/quiet-md-macos-arm64.zip"><img src="docs/images/download-macos.svg" height="56" alt="Download for macOS"></a>
+  <a href="https://github.com/yqhuang2912/quiet-md/releases/latest"><img src="docs/images/download-macos.svg" height="56" alt="Download for macOS"></a>
   &nbsp;
-  <a href="https://download.quiet.md/latest/quiet-md-windows-x64-setup.exe"><img src="docs/images/download-windows.svg" height="56" alt="Download for Windows"></a>
+  <a href="https://github.com/yqhuang2912/quiet-md/releases/latest"><img src="docs/images/download-windows.svg" height="56" alt="Download for Windows"></a>
   &nbsp;
   <a href="https://download.quiet.md/latest/quiet-md-x86_64.AppImage"><img src="docs/images/download-linux.svg" height="56" alt="Download for Linux"></a>
 </p>
 
 | Platform | Package | Requirements |
 |---|---|---|
-| **macOS** (Apple Silicon) | [quiet-md-macos-arm64.zip](https://download.quiet.md/latest/quiet-md-macos-arm64.zip) | macOS 13 or later |
-| **Windows** (x64) | [quiet-md-windows-x64-setup.exe](https://download.quiet.md/latest/quiet-md-windows-x64-setup.exe) | Windows 10 version 2004 or later |
+| **macOS** (Apple Silicon) | [quiet-md-macos-arm64.zip](https://github.com/yqhuang2912/quiet-md/releases/latest) | macOS 13 or later |
+| **Windows** (x64) | [quiet-md-windows-x64-setup.exe](https://github.com/yqhuang2912/quiet-md/releases/latest) | Windows 10 version 2004 or later |
 | **Linux** (x86_64, experimental) | [quiet-md-x86_64.AppImage](https://download.quiet.md/latest/quiet-md-x86_64.AppImage) | glibc 2.35 or later (Ubuntu 22.04 and newer) |
-| **macOS** (Intel) | [quiet-md-macos-x86_64.zip](https://download.quiet.md/latest/quiet-md-macos-x86_64.zip) | macOS 13 or later |
+| **macOS** (Intel) | [quiet-md-macos-x86_64.zip](https://github.com/yqhuang2912/quiet-md/releases/latest) | macOS 13 or later |
 
 - **macOS**: unzip and drag `quiet.md.app` into Applications. The app is signed and notarized by Apple.
 - **Windows**: run the installer. By default it installs for the current user only, and uninstalling never deletes your notes. If SmartScreen appears on first launch, click **More info → Run anyway**.

@@ -1175,14 +1175,10 @@ impl Core {
             self.sel = Selection::caret(Pos::new(id, 0));
             return;
         }
-        if let BlockKind::Code { .. } = block.kind {
-            // The new line keeps the current line's indentation.
-            let before = &block.text.text[..p.offset];
-            let line = &before[before.rfind('\n').map_or(0, |i| i + 1)..];
-            let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-            let ins = format!("\n{indent}");
-            self.text_mut(p.block).unwrap().insert_plain(p.offset, &ins, Marks::default());
-            self.sel = Selection::caret(Pos::new(p.block, p.offset + ins.len()));
+        if let BlockKind::Code { lang, .. } = &block.kind {
+            let ins = super::code_indent::newline(&block.text.text, p.offset, lang);
+            self.text_mut(p.block).unwrap().replace(p.offset..p.offset + ins.remove, &RichText::plain(ins.text));
+            self.sel = Selection::caret(Pos::new(p.block, p.offset + ins.caret));
             return;
         }
         let empty = block.text.is_empty();
@@ -3481,6 +3477,69 @@ mod tests {
         assert_ne!(t, b);
         assert_eq!(c.trailing_line(), t);
         assert!(xml(&c).ends_with("</pre>\n<p></p>\n"), "{}", xml(&c));
+    }
+
+    #[test]
+    fn code_enter_indents_openers_and_preserves_code_style() {
+        // The | marker is the caret; test the public edit, cursor placement,
+        // XML round trip and undo/redo together, including non-ASCII offsets.
+        for (lang, before, after) in [
+            ("python", "def f():|", "def f():\n    |"),
+            ("python", "if 名称: # 注释|", "if 名称: # 注释\n    |"),
+            ("python", "if x:\n  run()\n  if y:|", "if x:\n  run()\n  if y:\n    |"),
+            ("python", "\tif x:|", "\tif x:\n\t\t|"),
+            ("python", "if x:|\n\trun()", "if x:\n\t|\n\trun()"),
+            ("python", "    print('中文')|", "    print('中文')\n    |"),
+            ("python", "# label:|", "# label:\n|"),
+            ("python", "message = 'label:'|", "message = 'label:'\n|"),
+            ("python", "text = \"\"\"\nlabel:|", "text = \"\"\"\nlabel:\n|"),
+            ("python", "value = 4 // 2\nif value:|", "value = 4 // 2\nif value:\n    |"),
+            ("rust", "fn f<'a>() {|}", "fn f<'a>() {\n    |\n}"),
+            ("rust", "    if ready {|  }", "    if ready {\n        |\n    }"),
+            ("javascript", "if (ready) { // comment|", "if (ready) { // comment\n    |"),
+            ("javascript", "const x = '{';|", "const x = '{';\n|"),
+            ("javascript", "// {|", "// {\n|"),
+            ("javascript", "/*\n {|", "/*\n {\n |"),
+            ("javascript", "if (x) {\n  a();\n  if (y) {|}", "if (x) {\n  a();\n  if (y) {\n    |\n  }"),
+            ("json", "{|}", "{\n    |\n}"),
+            ("json", "[|  ]", "[\n    |\n]"),
+            ("python", "items = [|]", "items = [\n    |\n]"),
+            ("plaintext", "  {|}", "  {\n  |}"),
+            ("markdown", "[|]", "[\n|]"),
+        ] {
+            let mut c = doc(&format!("<title>T</title><pre lang=\"{lang}\"><code></code></pre>"));
+            let b = id(&c, 1);
+            let at = before.find('|').unwrap();
+            *c.text_mut(b).unwrap() = RichText::plain(before.replacen('|', "", 1));
+            c.sel = Selection::caret(Pos::new(b, at));
+            let original = xml(&c);
+            c.enter();
+            assert_eq!(c.text_of(b).unwrap().text, after.replacen('|', "", 1), "{lang}: {before}");
+            assert_eq!(c.sel.head, Pos::new(b, after.find('|').unwrap()), "{lang}: {before}");
+            let changed = xml(&c);
+            assert_eq!(xml(&doc(&changed)), changed);
+            c.undo();
+            assert_eq!(xml(&c), original);
+            assert_eq!(c.sel.head, Pos::new(b, at));
+            c.redo();
+            assert_eq!(xml(&c), changed);
+        }
+    }
+
+    #[test]
+    fn code_enter_replaces_selection_as_one_undo_step() {
+        let mut c = doc("<title>T</title><pre lang=\"python\"><code>if 名称:replace</code></pre>");
+        let b = id(&c, 1);
+        let start = "if 名称:".len();
+        let selection = Selection { anchor: Pos::new(b, start), head: Pos::new(b, c.len_of(b)) };
+        c.sel = selection;
+        let original = xml(&c);
+        c.enter();
+        assert_eq!(c.text_of(b).unwrap().text, "if 名称:\n    ");
+        assert_eq!(c.sel.head, Pos::new(b, "if 名称:\n    ".len()));
+        c.undo();
+        assert_eq!(xml(&c), original);
+        assert_eq!(c.sel, selection);
     }
 
     #[test]

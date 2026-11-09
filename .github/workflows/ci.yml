@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, mynote]
     # Docs-only pushes skip CI. Pull requests always run: main requires
     # both checks, and a skipped workflow never reports them.
     paths-ignore:
@@ -105,7 +105,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
           & python scripts/check.py
           if ($LASTEXITCODE -ne 0) { throw 'Windows checks failed' }
-          & scripts/package-windows.ps1 -Iscc "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          $iscc = @("${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe", "$env:ProgramFiles/Inno Setup 7/ISCC.exe", "${env:ProgramFiles(x86)}/Inno Setup 7/ISCC.exe") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (!$iscc) { throw 'Inno Setup compiler was not found on the runner' }
+          & scripts/package-windows.ps1 -Iscc $iscc
           if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
 
       - name: Upload Windows installer

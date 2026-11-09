@@ -37,7 +37,7 @@ fn color(t: Tok) -> Hsla {
         Tok::Attr => "syntax.attr",
         Tok::BuiltIn | Tok::Title => "syntax.function",
     };
-    crate::editor_theme::style().color(key).unwrap_or_else(|| c(0x8d9096))
+    crate::media_theme::code_style().color(key).unwrap_or_else(|| c(0x8d9096))
 }
 
 #[derive(Default)]
@@ -272,7 +272,7 @@ pub fn spans(lang: &str, text: &str) -> Vec<Span> {
 
 fn push(out: &mut Vec<Span>, r: Range<usize>, t: Tok) {
     if r.start < r.end {
-        out.push((r, color(t), t == Tok::Comment));
+        out.push((r, color(t), t == Tok::Comment && !crate::settings::manbianliang()));
     }
 }
 

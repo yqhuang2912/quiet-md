@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-pub(crate) const APP_ID: &str = "com.s1dashu.quietmd";
+pub(crate) const APP_ID: &str = "io.github.yqhuang2912.mynote";
 
 mod app;
 mod shared_store;
@@ -45,6 +45,7 @@ mod folders;
 mod file_history;
 mod settings;
 mod themes;
+mod media_theme;
 mod shortcuts;
 #[allow(dead_code, unused_imports)]
 mod feishu_theme;

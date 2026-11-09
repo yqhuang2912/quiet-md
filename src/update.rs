@@ -1,9 +1,9 @@
 //! 自动更新. A copy installed from a release package reads
-//! `https://download.quiet.md/latest/update-<platform>.json` (written last by
-//! scripts/publish-downloads.sh) 10s after launch and every 12h while
+//! this fork's GitHub Releases `update-<platform>.json` (published with its
+//! signed packages) 10s after launch and every 12h while
 //! 自动检查更新 is on; 检查更新… asks at once. Nothing is downloaded until the
 //! user asks: the package is fetched with `curl`, its minisign signature checked
-//! against packaging/update-key.pub (the trusted comment must be the package's
+//! against packaging/mynote-update-key.pub (the trusted comment must be the package's
 //! own file name, so an old signed package cannot pose as a newer version),
 //! and on macOS the unpacked app must also carry this copy's code signature
 //! team. 重启以更新 quits through the usual save path; a detached helper waits
@@ -20,8 +20,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const BASE: &str = "https://download.quiet.md/latest";
-const KEY: &str = match option_env!("QUIET_MD_UPDATE_PUBKEY") { Some(k) => k, None => include_str!("../packaging/update-key.pub") };
+pub const REPOSITORY: &str = "yqhuang2912/quiet-md";
+const RELEASES: &str = "https://github.com/yqhuang2912/quiet-md/releases";
+const BASE: &str = "https://github.com/yqhuang2912/quiet-md/releases/latest/download";
+const KEY: &str = match option_env!("QUIET_MD_UPDATE_PUBKEY") { Some(k) => k, None => include_str!("../packaging/mynote-update-key.pub") };
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Manifest {
@@ -39,6 +41,8 @@ pub enum State {
     Unsupported,
     Checking,
     Current,
+    /// No public release (or no package for this platform) has been published.
+    NotPublished,
     Available(Manifest),
     Downloading(Manifest),
     /// Verified and unpacked: the new `.app` (macOS) or the installer (Windows).
@@ -99,6 +103,7 @@ pub fn check(manual: bool, cx: &mut App) {
                 Ok(Some(m)) => State::Available(m),
                 Ok(None) => State::Current,
                 Err(Error::Unsupported) => State::Unsupported,
+                Err(Error::NotPublished) => State::NotPublished,
                 Err(Error::Failed(e)) if manual => State::Failed(e),
                 // A quiet retry at the next check; keep whatever was shown.
                 Err(Error::Failed(_)) => return,
@@ -156,7 +161,7 @@ pub fn install(cx: &mut App) {
 
 // ---- the server
 
-enum Error { Unsupported, Failed(String) }
+enum Error { Unsupported, NotPublished, Failed(String) }
 
 fn platform() -> Option<&'static str> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) { Some("macos-arm64") }
@@ -191,7 +196,7 @@ fn supported() -> bool {
     if override_url().is_some() { return true }
     if crate::devtools::scripted() { return false }
     #[cfg(target_os = "macos")]
-    { app_bundle().is_some_and(|app| team(&app).is_some()) }
+    { app_bundle().is_some_and(|app| run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(app)).is_ok()) }
     #[cfg(target_os = "windows")]
     { std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("unins000.exe").is_file())).unwrap_or(false) }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -203,7 +208,7 @@ fn fetch_manifest() -> Result<Option<Manifest>, Error> {
     if !supported() { return Err(Error::Unsupported) }
     let platform = platform().unwrap();
     let url = format!("{}/update-{platform}.json", override_url().as_deref().unwrap_or(BASE).trim_end_matches('/'));
-    let body = curl(&["--max-time", "20", &url]).map_err(Error::Failed)?;
+    let body = curl_manifest(&url, override_url().is_some()).map_err(Error::Failed)?.ok_or(Error::NotPublished)?;
     let m: Manifest = serde_json::from_slice(&body).map_err(|e| Error::Failed(format!("{}: {e}", crate::settings::tr("更新信息无法识别", "Unrecognised update information"))))?;
     validate(&m, platform, override_url().is_some()).map_err(Error::Failed)?;
     Ok(newer(&m.version, env!("CARGO_PKG_VERSION")).then_some(m))
@@ -215,7 +220,9 @@ fn validate(m: &Manifest, platform: &str, testing: bool) -> Result<(), String> {
     let name = package_name(&m.version, platform);
     let bad = |what: &str| Err(format!("{}: {what}", crate::settings::tr("更新信息无效", "Invalid update information")));
     if m.version.split('.').any(|p| p.parse::<u64>().is_err()) { return bad("version") }
-    if !(m.url.starts_with("https://") || testing) || !m.url.ends_with(&format!("/{name}")) { return bad("url") }
+    let secure = m.url.starts_with("https://") || testing && m.url.starts_with("http://");
+    if !secure || !m.url.ends_with(&format!("/{name}")) { return bad("url") }
+    if !testing && m.url != format!("{RELEASES}/download/mynote-v{}/{name}", m.version) { return bad("repository/tag") }
     if m.size == 0 || m.size > 1 << 30 { return bad("size") }
     match minisign_verify::Signature::decode(&m.signature) { Ok(sig) if sig.trusted_comment() == name => Ok(()), _ => bad("signature") }
 }
@@ -227,7 +234,7 @@ fn signed(bytes: &[u8], signature: &str, name: &str, key: &minisign_verify::Publ
 
 fn updates_dir() -> PathBuf {
     let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
-    if cfg!(target_os = "macos") { base.join("com.s1dashu.quietmd").join("updates") } else { base.join("quiet.md").join("updates") }
+    base.join("io.github.yqhuang2912.mynote").join("updates")
 }
 
 /// Downloads, checks the signature and (macOS) unpacks; the path to install.
@@ -256,9 +263,11 @@ fn fetch_package(m: &Manifest) -> Result<PathBuf, String> {
         run(Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(&file).arg(&unpacked))?;
         let app = unpacked.join("quiet.md.app");
         run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&app)).map_err(|_| failed("codesign"))?;
-        // Signed by the same team as this copy (unsigned only against unsigned, when testing).
+        // The package is already authenticated by this fork's Minisign key.
+        // Developer ID builds additionally keep their Apple team; ad-hoc
+        // personal builds may update to another verified ad-hoc build.
         let mine = app_bundle().and_then(|a| team(&a));
-        if team(&app) != mine || mine.is_none() && override_url().is_none() { return Err(failed("team")) }
+        if team(&app) != mine { return Err(failed("team")) }
         let _ = std::fs::remove_file(&file);
         Ok(app)
     }
@@ -266,16 +275,34 @@ fn fetch_package(m: &Manifest) -> Result<PathBuf, String> {
     Ok(file)
 }
 
-fn curl(args: &[&str]) -> Result<Vec<u8>, String> { curl_to(args, Stdio::piped()) }
+fn protocols() -> &'static str { if override_url().is_some() { "=https,http" } else { "=https" } }
+
+/// A missing latest asset is a fresh channel, not an up-to-date application.
+fn curl_manifest(url: &str, testing: bool) -> Result<Option<Vec<u8>>, String> {
+    let protocols = if testing { "=https,http" } else { "=https" };
+    let out = command("curl").args(["-sSL", "--proto", protocols, "--proto-redir", protocols, "--connect-timeout", "15", "--max-time", "20", "--max-filesize", "1048576", "--write-out", "\n%{http_code}", url])
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() { return Err(curl_error(&out.stderr)) }
+    let at = out.stdout.iter().rposition(|b| *b == b'\n').ok_or("Missing HTTP status")?;
+    match &out.stdout[at + 1..] {
+        b"404" => Ok(None),
+        b"200" => Ok(Some(out.stdout[..at].to_vec())),
+        status => Err(format!("{}: HTTP {}", crate::settings::tr("无法连接更新服务器", "Could not reach the update server"), String::from_utf8_lossy(status))),
+    }
+}
+
+fn curl_error(stderr: &[u8]) -> String {
+    let msg = String::from_utf8_lossy(stderr).trim().trim_start_matches("curl: ").to_string();
+    format!("{}: {msg}", crate::settings::tr("无法连接更新服务器", "Could not reach the update server"))
+}
 
 /// `stdout`: piped (returned) or a file to download into.
 fn curl_to(args: &[&str], stdout: Stdio) -> Result<Vec<u8>, String> {
-    let out = command("curl").args(["-fsSL", "--proto", "=https,http", "--connect-timeout", "15"]).args(args)
+    let out = command("curl").args(["-fsSL", "--proto", protocols(), "--proto-redir", protocols(), "--connect-timeout", "15"]).args(args)
         .stdin(Stdio::null()).stdout(stdout).stderr(Stdio::piped()).output()
         .map_err(|e| format!("curl: {e}"))?;
     if out.status.success() { return Ok(out.stdout) }
-    let msg = String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("curl: ").to_string();
-    Err(format!("{}: {msg}", crate::settings::tr("无法连接更新服务器", "Could not reach the update server")))
+    Err(curl_error(&out.stderr))
 }
 
 /// A command that opens no console window on Windows.
@@ -353,9 +380,12 @@ fn start_installer(new: &Path) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn start_installer(setup: &Path) -> Result<(), String> {
     let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    let folder = current.parent().ok_or("installation directory")?;
+    let install_dir = quote(&format!("/DIR=\"{}\"", folder.display()));
     let script = format!(
-        "Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -FilePath {} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/UPDATE=1'",
-        std::process::id(), quote(&setup.to_string_lossy()));
+        "Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -WindowStyle Hidden -FilePath {} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/UPDATE=1',{}",
+        std::process::id(), quote(&setup.to_string_lossy()), install_dir);
     command("powershell.exe").args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
         .spawn().map(drop).map_err(|e| e.to_string())
@@ -406,22 +436,58 @@ FuE4L1zQnqL1nA/5xffpEtZyK2ca882Q1joA5X11poZ1xezdAlEMfn/36MJc5C60clQFec4vQf66MoxP
 
     #[test]
     fn manifests_must_name_the_signed_package() {
-        let ok = manifest("0.2.0", "https://download.quiet.md/v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        let ok = manifest("0.2.0", "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
         assert_eq!(validate(&ok, "macos-arm64", false), Ok(()));
         assert!(validate(&ok, "macos-x86_64", false).is_err());
-        let intel = manifest("0.2.0", "https://download.quiet.md/v0.2.0/quiet-md-0.2.0-macos-x86_64.zip", "quiet-md-0.2.0-macos-x86_64.zip");
+        let intel = manifest("0.2.0", "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-macos-x86_64.zip", "quiet-md-0.2.0-macos-x86_64.zip");
         assert_eq!(validate(&intel, "macos-x86_64", false), Ok(()));
         assert!(validate(&intel, "macos-arm64", false).is_err());
         // An older package's signature under a newer version number.
-        let replay = manifest("0.9.0", "https://download.quiet.md/v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        let replay = manifest("0.9.0", "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
         assert!(validate(&replay, "macos-arm64", false).is_err());
-        let renamed = manifest("0.9.0", "https://download.quiet.md/v0.9.0/quiet-md-0.9.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        let renamed = manifest("0.9.0", "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.9.0/quiet-md-0.9.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
         assert!(validate(&renamed, "macos-arm64", false).is_err());
-        let http = manifest("0.2.0", "http://download.quiet.md/v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        let http = manifest("0.2.0", "http://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
         assert!(validate(&http, "macos-arm64", false).is_err());
         assert_eq!(validate(&http, "macos-arm64", true), Ok(()));
-        let windows = manifest("0.2.0", "https://download.quiet.md/v0.2.0/quiet-md-0.2.0-windows-x64-setup.exe", "quiet-md-0.2.0-windows-x64-setup.exe");
+        let windows = manifest("0.2.0", "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-windows-x64-setup.exe", "quiet-md-0.2.0-windows-x64-setup.exe");
         assert_eq!(validate(&windows, "windows-x64", false), Ok(()));
         assert!(validate(&windows, "macos-arm64", false).is_err());
+        let upstream = manifest("0.2.0", "https://download.quiet.md/v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        assert!(validate(&upstream, "macos-arm64", false).is_err());
+        let wrong_repo = manifest("0.2.0", "https://github.com/s1dashu/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        assert!(validate(&wrong_repo, "macos-arm64", false).is_err());
+        let wrong_tag = manifest("0.2.0", "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.9.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        assert!(validate(&wrong_tag, "macos-arm64", false).is_err());
+    }
+
+    #[test]
+    fn personal_channel_has_its_own_trust_key() {
+        assert_ne!(super::KEY.trim(), include_str!("../packaging/update-key.pub").trim());
+        let key = super::public_key().expect("personal public key must decode");
+        assert!(!signed(b"quiet.md", TEST_SIG, "quiet-md-0.2.0-macos-arm64.zip", &key));
+    }
+
+    #[test]
+    fn manifest_http_distinguishes_missing_releases_from_errors() {
+        use std::io::{Read, Write};
+        fn fetch(status: &str, body: &str) -> Result<Option<Vec<u8>>, String> {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/update-windows-x64.json", listener.local_addr().unwrap());
+            let response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request).unwrap();
+                socket.write_all(response.as_bytes()).unwrap();
+            });
+            let result = super::curl_manifest(&url, true);
+            server.join().unwrap();
+            result
+        }
+        assert_eq!(fetch("404 Not Found", "Not Found").unwrap(), None);
+        assert_eq!(fetch("200 OK", "{\"version\":\"0.2.0\"}\n").unwrap(), Some(b"{\"version\":\"0.2.0\"}\n".to_vec()));
+        assert!(fetch("500 Internal Server Error", "unavailable").unwrap_err().contains("HTTP 500"));
     }
 }

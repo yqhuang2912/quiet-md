@@ -544,7 +544,7 @@ fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, wi
 }
 
 fn font_for(spec: &TextSpec, m: &Marks) -> Font {
-    let family: SharedString = if spec.mono || m.code { theme::mono_font().into() } else if let Some(f) = spec.font { f.into() } else if spec.doc_font { theme::body_font().into() } else { theme::UI_FONT.into() };
+    let family: SharedString = if spec.mono || m.code { crate::media_theme::mono_font().into() } else if let Some(f) = spec.font { f.into() } else if spec.doc_font { theme::body_font().into() } else { theme::UI_FONT.into() };
     Font {
         family,
         features: FontFeatures::default(),
@@ -564,7 +564,8 @@ fn span_color(spec: &TextSpec, m: &Marks) -> Hsla {
         return Theme::link();
     }
     let st = theme::style();
-    let own = if crate::settings::feishu() || spec.mono { None } else if m.code { st.color("code.color") } else if m.bold { st.color("strong.color") } else { None };
+    let own = if m.code && !spec.mono && let Some(media) = crate::media_theme::active() { media.color("code.color") }
+        else if crate::settings::feishu() || spec.mono { None } else if m.code { st.color("code.color") } else if m.bold { st.color("strong.color") } else { None };
     let c = match m.text_color.as_ref().and_then(|c| theme::text_color(&c.0)) {
         Some(c) if spec.dim_marks => c.opacity(0.7),
         Some(c) => c,
@@ -968,10 +969,13 @@ impl Element for RichTextElement {
                 }
                 for r in layout.rects_for(range) {
                     let inset = if crate::settings::feishu() { px(3.) } else { ((r.size.height - px(self.spec.size * 1.32)) / 2.).max(px(0.)) };
-                    let (pad, radius) = if crate::settings::feishu() { (2., 4.) } else { (theme::style().num("code.pad"), theme::style().num("code.radius")) };
+                    let media = crate::media_theme::active();
+                    let (pad, radius) = if let Some(st) = media { (st.num("code.pad"), st.num("code.radius")) } else if crate::settings::feishu() { (2., 4.) } else { (theme::style().num("code.pad"), theme::style().num("code.radius")) };
+                    let bg = media.and_then(|s| s.color("code.bg")).unwrap_or_else(|| if crate::settings::feishu() { Theme::bg_overlay() } else { Theme::code_chip() });
+                    let border = media.and_then(|s| s.color("code.border")).unwrap_or_else(|| if crate::settings::feishu() { Theme::line_border() } else { Theme::code_chip_border() });
                     let r = Bounds::from_corners(point(r.left() - px(pad), r.top() + inset), point(r.right() + px(pad), r.bottom() - inset));
                     window.paint_quad(
-                        quad(r, px(radius), if crate::settings::feishu() { Theme::bg_overlay() } else { Theme::code_chip() }, px(1.), if crate::settings::feishu() { Theme::line_border() } else { Theme::code_chip_border() }, BorderStyle::Solid),
+                        quad(r, px(radius), bg, px(1.), border, BorderStyle::Solid),
                     );
                 }
             }

@@ -496,7 +496,9 @@ impl R<'_> {
         let ed = self.ed;
         let ui = &ed.img;
         let id = b.id;
-        let container = if env.width > 0. { env.width } else { ed.content_width() };
+        let reading = crate::media_theme::active().is_some();
+        let inset = if reading { crate::media_theme::FIGURE_INSET } else { 0. };
+        let container = ((if env.width > 0. { env.width } else { ed.content_width() }) - 2. * inset).max(1.);
         if !self.ghost {
             ui.containers.borrow_mut().insert(id, container);
         }
@@ -522,7 +524,7 @@ impl R<'_> {
             Theme::line_border()
         };
         // Whole images round their corners; a crop (or the crop tool) shows square ones.
-        let radius = if cropping || g.crop != FULL { 0. } else { RADIUS };
+        let radius = if reading || cropping || g.crop != FULL { 0. } else { RADIUS };
 
         let weak = cx.weak_entity();
         let src_s = src.clone();
@@ -635,7 +637,8 @@ impl R<'_> {
         // keeps 4px below it (`.with-caption`). The caption: 13pt, light,
         // the caption grey, centred.
         let caption_el = show_caption.then(|| {
-            let wrap = div().id(("image-caption", id.0)).mt(px(6.)).w_full().flex().font_family(theme::UI_FONT);
+            let wrap = div().id(("image-caption", id.0)).mt(px(if reading { crate::media_theme::CAPTION_GAP } else { 6. })).w_full().flex().font_family(theme::UI_FONT)
+                .when(reading, |d| d.pt(px(crate::media_theme::CAPTION_GAP)).border_t_1().border_color(crate::media_theme::caption_border()));
             match ed.caption_field(id).filter(|_| !self.ghost) {
                 Some(f) => wrap
                     .child(f)
@@ -651,10 +654,10 @@ impl R<'_> {
                     .into_any_element(),
                 None => wrap
                     .justify_center()
-                    .text_size(px(13.))
-                    .line_height(px(20.))
-                    .font_weight(FontWeight::LIGHT)
-                    .text_color(Theme::caption())
+                    .text_size(px(if reading { crate::media_theme::CAPTION_SIZE } else { 13. }))
+                    .line_height(px(if reading { crate::media_theme::CAPTION_LINE } else { 20. }))
+                    .font_weight(if reading { FontWeight::NORMAL } else { FontWeight::LIGHT })
+                    .text_color(if reading { crate::media_theme::caption_color() } else { Theme::caption() })
                     .child(caption.clone().unwrap_or_default())
                     .into_any_element(),
             }
@@ -668,7 +671,9 @@ impl R<'_> {
                 Align::Right => d.justify_end(),
             })
             .when(show_caption, |d| d.pb(px(4.)))
-            .child(div().flex().flex_col().w(px(bw)).child(image_box).children(caption_el))
+            .child(div().flex().flex_col().w(px(bw + 2. * inset))
+                .when(reading, |d| d.p(px(inset - 1.)).border_1().border_color(crate::media_theme::figure_border()))
+                .child(image_box).children(caption_el))
             .into_any_element()
     }
 

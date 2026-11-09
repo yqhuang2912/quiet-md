@@ -15,6 +15,12 @@ const RADIUS: f32 = 12.;
 /// Each version's notes: (version, [(中文, English)]). Only the running
 /// version's are shown; a version without notes shows nothing.
 const NOTES: &[(&str, &[(&str, &str)])] = &[
+    ("0.2.0", &[
+        ("个人版本：通过 NAS 与 Tailscale 同步笔记和附件", "Personal edition: sync notes and attachments through a NAS and Tailscale"),
+        ("新增慢变量图片、图注与代码样式，表格保持原配色并居中", "Manbianliang image, caption and code styles; centred tables keep their existing colours"),
+        ("代码块支持基础自动缩进与括号内换行", "Basic automatic indentation and newlines inside bracket pairs in code blocks"),
+        ("更新渠道切换为 yqhuang2912/quiet-md 的 GitHub Releases", "Updates now come from yqhuang2912/quiet-md on GitHub Releases"),
+    ]),
     ("0.1.9", &[
         ("macOS：修复 ⌘Q 无法退出的问题，保留退出前的保存检查", "macOS: fix Cmd+Q not quitting, while keeping save checks before exit"),
         ("Windows：修复关闭、最大化和最小化按钮无响应的问题", "Windows: fix unresponsive close, maximize, and minimize buttons"),

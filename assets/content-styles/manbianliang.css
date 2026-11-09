@@ -1,0 +1,37 @@
+/* Reading-page code styles from manbianliang-notes/dist/notes/styles.css.
+ * Scoped to code by media_theme.rs; never selected as a document theme.
+ */
+:root {
+  --theme-name: "慢变量图片与代码";
+  --theme-base: craft;
+}
+code {
+  color: #4b5563;
+  background-color: #f2f4f7;
+  border-color: #e2e5e9;
+  border-radius: 3px;
+  padding-left: 4px;
+}
+pre {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 14px;
+  line-height: 21px;
+  color: #000000;
+  background-color: #f5f2f0;
+  border-color: transparent;
+  border-radius: 0;
+}
+.line-numbers {
+  display: block;
+  color: #999999;
+  background-color: #f5f2f0;
+}
+.token.comment { color: #708090; }
+.token.keyword { color: #0077aa; }
+.token.tag { color: #990055; }
+.token.boolean { color: #990055; }
+.token.number { color: #990055; }
+.token.string { color: #669900; }
+.token.class-name { color: #dd4a68; }
+.token.attr-name { color: #669900; }
+.token.function { color: #dd4a68; }

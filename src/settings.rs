@@ -16,6 +16,7 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 static FEISHU: AtomicBool = AtomicBool::new(false);
 static ENGLISH: AtomicBool = AtomicBool::new(true);
 static MOTION_HIGH: AtomicBool = AtomicBool::new(false);
+static MANBIANLIANG: AtomicBool = AtomicBool::new(false);
 static PREFS: RwLock<Option<Preferences>> = RwLock::new(None);
 
 /// The active document theme draws blocks the 飞书 way (else Craft's).
@@ -24,6 +25,7 @@ pub(crate) fn set_base(feishu: bool) { FEISHU.store(feishu, Ordering::Relaxed); 
 pub fn english() -> bool { ENGLISH.load(Ordering::Relaxed) }
 /// 外观 › 动画 is 丰富: folding, the selection and hover animate too (else they answer at once).
 pub fn motion_high() -> bool { MOTION_HIGH.load(Ordering::Relaxed) }
+pub fn manbianliang() -> bool { MANBIANLIANG.load(Ordering::Relaxed) }
 pub fn tr(zh: &'static str, en: &'static str) -> &'static str { if english() { en } else { zh } }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -46,6 +48,8 @@ pub struct Preferences {
     pub seen_version: String,
     /// 动画: "high" animates folding, the selection and hover; empty keeps them instant.
     pub motion: String,
+    /// Optional image/code reading preset; empty follows the document theme.
+    pub media_style: String,
 }
 
 /// Pick the first supported system language; saved preferences still win.
@@ -60,7 +64,7 @@ fn system_english() -> bool {
 }
 
 impl Default for Preferences {
-    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new() } }
+    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), media_style: String::new() } }
 }
 
 impl Preferences {
@@ -80,6 +84,7 @@ fn apply(p: Preferences) {
     FEISHU.store(p.feishu, Ordering::Relaxed);
     ENGLISH.store(p.english, Ordering::Relaxed);
     MOTION_HIGH.store(p.motion == "high", Ordering::Relaxed);
+    MANBIANLIANG.store(p.media_style == "manbianliang", Ordering::Relaxed);
     // Before the themes are read (startup) the base comes from `feishu`.
     themes::select(&p.theme_id());
     *PREFS.write().unwrap() = Some(p);
@@ -299,10 +304,11 @@ const PAGE_S: f32 = 0.78;
 /// highlighted code), at scale `s`, in two columns so it reads at a glance.
 fn sample_page(t: &themes::Theme, s: f32) -> Div {
     let st = t.style;
+    let code_st = crate::media_theme::active().unwrap_or(st);
     let sc = |v: f32| px((v * s).max(0.5));
     let text = st.color("page.color").unwrap_or_else(|| st.token("text"));
     let (body, line) = (st.num("page.size"), st.num("page.line"));
-    let (font, mono): (SharedString, SharedString) = (st.font("page.font").into(), st.font("pre.font").into());
+    let (font, mono): (SharedString, SharedString) = (st.font("page.font").into(), code_st.font("pre.font").into());
     let gap = sc(st.num("p.gap")).clamp(px(4.), px(9.));
     let p = |c: Div| c.text_size(sc(body)).line_height(sc(line));
     let heading = |l: u8, s: &'static str| {
@@ -311,8 +317,8 @@ fn sample_page(t: &themes::Theme, s: f32) -> Div {
             .text_color(st.color(&format!("{h}.color")).unwrap_or(text)).child(s)
     };
     let link = st.color("a.color").unwrap_or(text);
-    let chip = |s: &'static str| div().px(sc(st.num("code.pad")).max(px(2.))).rounded(sc(st.num("code.radius"))).bg(st.color("code.bg").unwrap_or_else(|| st.token("code_chip")))
-        .border_1().border_color(st.color("code.border").unwrap_or_else(|| st.token("code_chip_border"))).font_family(mono.clone()).text_color(st.color("code.color").unwrap_or(text)).child(s);
+    let chip = |s: &'static str| div().px(sc(code_st.num("code.pad")).max(px(2.))).rounded(sc(code_st.num("code.radius"))).bg(code_st.color("code.bg").unwrap_or_else(|| code_st.token("code_chip")))
+        .border_1().border_color(code_st.color("code.border").unwrap_or_else(|| code_st.token("code_chip_border"))).font_family(mono.clone()).text_color(code_st.color("code.color").unwrap_or(text)).child(s);
     let para = p(div().flex().flex_wrap().items_center())
         .child(tr("Quiet.md 是一款", "Quiet.md is a "))
         .child(div().font_weight(FontWeight(st.num("strong.weight"))).text_color(st.color("strong.color").unwrap_or(text)).child(tr("安静的本地笔记应用", "quiet, local notes app")))
@@ -363,14 +369,14 @@ fn sample_page(t: &themes::Theme, s: f32) -> Div {
             x += step;
         }
     }).w_full().h(px(hr_w));
-    let syn = |k: &str| st.color(&format!("syntax.{k}")).unwrap_or(text);
+    let syn = |k: &str| code_st.color(&format!("syntax.{k}")).unwrap_or(text);
     let tok = |s: &'static str, c: Hsla| div().text_color(c).child(s);
     let code_line = |n: &'static str, parts: Vec<Div>| div().flex()
-        .when(st.flag("pre.numbers"), |d| d.child(div().flex_none().w(px(16.)).mr(px(8.)).text_color(st.color("pre.number-color").unwrap_or_else(|| st.token("code_line_number"))).child(n)))
+        .when(code_st.flag("pre.numbers"), |d| d.child(div().flex_none().w(px(16.)).mr(px(8.)).text_color(code_st.color("pre.number-color").unwrap_or_else(|| code_st.token("code_line_number"))).child(n)))
         .children(parts);
-    let code = div().w_full().overflow_hidden().px(px(10.)).py(px(7.)).rounded(sc(st.num("pre.radius"))).bg(st.color("pre.bg").unwrap_or_else(|| st.token("code_bg")))
-        .border_1().border_color(st.color("pre.border").unwrap_or_else(|| st.token("code_border")))
-        .font_family(mono.clone()).text_size(sc(st.num("pre.size"))).line_height(sc(st.num("pre.line"))).text_color(st.color("pre.color").unwrap_or_else(|| st.token("code_text")))
+    let code = div().w_full().overflow_hidden().px(px(10.)).py(px(7.)).rounded(sc(code_st.num("pre.radius"))).bg(code_st.color("pre.bg").unwrap_or_else(|| code_st.token("code_bg")))
+        .border_1().border_color(code_st.color("pre.border").unwrap_or_else(|| code_st.token("code_border")))
+        .font_family(mono.clone()).text_size(sc(code_st.num("pre.size"))).line_height(sc(code_st.num("pre.line"))).text_color(code_st.color("pre.color").unwrap_or_else(|| code_st.token("code_text")))
         .child(code_line("1", vec![tok("# ", syn("comment")), tok(tr("备份文档库", "back up your documents"), syn("comment"))]))
         .child(code_line("2", vec![tok("cd ", syn("function")), tok("~/Documents ", text), tok("&& ", syn("keyword")), tok("tar ", syn("function")), tok("-czf ", syn("attr")), tok("\"Quiet.tar.gz\" ", syn("string")), tok("Quiet.md", text)]))
         .child(code_line("3", vec![tok("echo ", syn("function")), tok("\"done\"", syn("string"))]));
@@ -484,7 +490,8 @@ impl Workspace {
             if p.quick_hotkey { crate::quick_note::register(cx); } else { crate::quick_note::suspend_hotkey(); }
         }
         if p.appearance != old.appearance { apply_appearance(&p.appearance); }
-        if p.theme_id() != old.theme_id() || p.english != old.english || sync_dark(cx) {
+        if p.media_style != old.media_style { themes::touch(); }
+        if p.theme_id() != old.theme_id() || p.media_style != old.media_style || p.english != old.english || sync_dark(cx) {
             refresh_all(self, cx);
         }
         cx.notify();
@@ -674,6 +681,9 @@ impl Workspace {
                         segmented("motion", &[tr("克制", "Low"), tr("丰富", "High")], usize::from(prefs().motion == "high"),
                             |w, i, cx| w.set_pref(|p| p.motion = ["", "high"][i].into(), cx), cx)).into_any_element(),
                     row(tr("文档主题", "Document theme"), None, picker).into_any_element(),
+                    row(tr("图片与代码样式", "Images and code"), Some(tr("采用慢变量阅读样式；表格保留原样式并居中", "Manbianliang reading styles; tables keep their theme and are centred").into()),
+                        segmented("media-style", &[tr("跟随文档主题", "Document theme"), tr("慢变量", "Manbianliang")], usize::from(prefs().media_style == "manbianliang"),
+                            |w, i, cx| w.set_pref(|p| p.media_style = ["", "manbianliang"][i].into(), cx), cx)).into_any_element(),
                     sample.into_any_element(),
                     row(tr("主题 CSS", "Theme CSS"), Some(where_),
                         div().flex().items_center().gap(px(8.))
@@ -735,7 +745,10 @@ impl Workspace {
             .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child("Quiet.md"))
             .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(format!("{} {}", tr("版本", "Version"), env!("CARGO_PKG_VERSION"))))
             .child(div().text_size(px(13.)).line_height(px(20.)).text_color(Theme::text_caption()).child(tr("本地优先的笔记应用：无需账号，文档就是你电脑上的文件。", "Local-first notes: no account, your documents are files on your Mac."))))
-            .child(group(None, vec![update_row(cx).into_any_element()]))
+            .child(group(None, vec![
+                row(tr("更新渠道", "Update channel"), None, div().text_size(px(13.)).text_color(Theme::text_caption()).child(format!("{} · GitHub Releases", crate::update::REPOSITORY))).into_any_element(),
+                update_row(cx).into_any_element(),
+            ]))
             .into_any_element()
     }
 }
@@ -775,9 +788,10 @@ fn update_row(cx: &mut Context<Workspace>) -> Div {
     let state = crate::update::state(cx);
     let (title, detail): (SharedString, Option<SharedString>) = match &state {
         State::Idle => (tr("软件更新", "Software update").into(), None),
-        State::Unsupported => (tr("软件更新", "Software update").into(), desc(tr("这个版本不能自动更新，请从网站下载新版本。", "This copy cannot update itself. Download new versions from the website."))),
+        State::Unsupported => (tr("软件更新", "Software update").into(), desc(tr("请先安装个人仓库 Releases 中的安装包，再使用自动更新。", "Install a package from your repository's Releases first to enable automatic updates."))),
         State::Checking => (tr("正在检查更新…", "Checking for updates…").into(), None),
         State::Current => (tr("已是最新版本", "Quiet.md is up to date").into(), None),
+        State::NotPublished => (tr("暂无已发布更新", "No published update yet").into(), desc(tr("个人仓库尚未发布此平台的更新包。", "Your repository has not published an update package for this platform yet."))),
         State::Available(m) => (crate::localized_format!("新版本 {} 可用", "Version {} is available", m.version).into(), None),
         State::Downloading(m) => (crate::localized_format!("正在下载 {}… {:.0}%", "Downloading {}… {:.0}%", m.version, crate::update::progress(m) * 100.).into(), None),
         State::Ready(m, _) => (crate::localized_format!("{} 已准备好", "{} is ready to install", m.version).into(), desc(tr("重启后完成更新，打开的文档会先保存。", "Quiet.md restarts to finish; open documents are saved first."))),
@@ -1363,6 +1377,17 @@ mod localization_tests {
 #[cfg(test)]
 mod preference_tests {
     use super::Preferences;
+
+    #[test]
+    fn media_preset_preserves_saved_document_theme_and_old_preferences() {
+        let old: Preferences = serde_json::from_str(r#"{"theme":"obsidian","feishu":false}"#).unwrap();
+        assert!(old.media_style.is_empty());
+        let custom = Preferences { media_style: "manbianliang".into(), ..old };
+        let restored: Preferences = serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
+        assert_eq!(restored.theme_id(), "obsidian");
+        assert!(!restored.feishu);
+        assert_eq!(restored.media_style, "manbianliang");
+    }
 
     #[test]
     fn new_preferences_use_feishu_without_overriding_saved_themes() {
