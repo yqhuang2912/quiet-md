@@ -107,3 +107,29 @@ NAS 的完整状态保存在 `/data/sync.sqlite3`。Compose 方案对应 Docker 
 服务检测数据库标识。如果已连接设备遇到新建的空 NAS 数据库，会拒绝继续同步；应先恢复 NAS 备份。需要建立全新同步关系时，先备份本地库，再使用新的同步文档库名称。不要直接删除同步状态来处理普通连接故障。
 
 正式对外发布个人版本前，还需要替换上游应用名称、应用标识、图标及受限素材，并配置自己的更新渠道；见上游 README 和 THIRD_PARTY.md。当前源码及可执行文件用于本地开发验证。
+
+## 维护个人版本
+
+个人仓库为 [yqhuang2912/quiet-md](https://github.com/yqhuang2912/quiet-md)，默认分支为 `mynote`。`origin` 指向个人仓库；`upstream` 指向 `https://github.com/s1dashu/quiet-md.git`。个人改造提交到 `mynote`，`main` 保留原项目基线。日常修改后先检查 `git diff` 和 `git status`，确认都是本次要保存的文件，再提交并推送：
+
+```sh
+git switch mynote
+git add .
+git commit -m "feat: describe the change"
+git push origin mynote
+```
+
+引入原项目更新前，先提交手头修改，确认 `git status` 干净。在已配置好 Rust 和 Windows SDK（Mac 为 Xcode Command Line Tools）的构建环境中运行：
+
+```sh
+git switch mynote
+git fetch upstream
+git merge --no-commit --no-ff upstream/main
+python scripts/check.py
+git commit -m "merge: sync upstream updates"
+git push origin mynote
+```
+
+如果合并提示 `Already up to date`，无需创建合并提交。出现冲突时先解决冲突、`git add` 对应文件，再运行检查和提交；想放弃尚未提交的这次合并，可运行 `git merge --abort`。macOS 可将 `python` 换成 `python3`。完整检查通过后再构建和更新正在使用的客户端；源码合并不会自动更新 NAS 容器或已打开的桌面应用。
+
+当前 Windows 仓库的 GitHub 网络访问使用本机已启用的代理 `127.0.0.1:7897`，仅写在本地 `.git/config`；其他电脑应使用各自的网络配置。NAS 令牌、`.env` 和 `dist/` 打包文件不提交到 Git。
