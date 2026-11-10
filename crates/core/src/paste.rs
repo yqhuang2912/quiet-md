@@ -1150,7 +1150,7 @@ fn pipe_table(lines: &[&str], off: Off) -> Option<(Block, usize)> {
             (0..ncols)
                 .map(|c| {
                     let mut blocks = md_cell(r.get(c).map_or("", String::as_str), off);
-                    for b in &mut blocks { if b.kind.has_text() { b.align = aligns[c]; } }
+                    for b in &mut blocks { b.align = aligns[c]; }
                     TableCell { blocks, ..TableCell::empty() }
                 })
                 .collect()

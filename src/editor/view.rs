@@ -566,6 +566,7 @@ impl Editor {
     }
 
     pub(super) fn set_caret(&mut self, p: Pos, extend: bool) {
+        self.find_caret_moved();
         self.core.cell_sel = None;
         if extend {
             self.core.sel.head = p;
@@ -1177,7 +1178,14 @@ impl Editor {
     }
 
     pub fn align(&mut self, a: Align, window: &mut Window, cx: &mut Context<Self>) {
-        if self.markdown { return; }
+        // A Markdown file keeps alignment only as a table column's.
+        if self.markdown {
+            if self.core.cell_sel.is_some() || self.core.cell_of(self.core.sel.head.block).is_some() {
+                self.core.table_align_columns(a);
+                self.changed(window, cx);
+            }
+            return;
+        }
         let ids = self.core.selected_blocks();
         self.core.set_align(&ids, a);
         self.changed(window, cx);
@@ -2246,6 +2254,7 @@ impl Editor {
         if let Some(pos) = self.pos_at(p)
             && pos != self.core.sel.head
         {
+            self.find_caret_moved();
             self.core.sel.head = pos;
             cx.notify();
         }

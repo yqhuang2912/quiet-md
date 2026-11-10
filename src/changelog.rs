@@ -15,6 +15,12 @@ const RADIUS: f32 = 12.;
 /// Each version's notes: (version, [(中文, English)]). Only the running
 /// version's are shown; a version without notes shows nothing.
 const NOTES: &[(&str, &[(&str, &str)])] = &[
+    ("0.2.4", &[
+        ("合入官方 0.1.10：新建菜单、宽表格横向滚动条和 Markdown 表格列对齐", "Merge upstream 0.1.10: the New menu, horizontal scrollbars for wide tables and Markdown column alignment"),
+        ("查找时点击正文后，从新光标位置继续查找上一个或下一个；关闭查找保留点击位置", "Find Previous and Next continue from a newly placed caret; closing Find preserves that position"),
+        ("图片表格保存和重新打开时保留图片及列对齐方式", "Preserve images and column alignment when saving and reopening Markdown tables"),
+        ("长输入框跟随光标滚动，改善文件夹新建和重命名体验", "Long input fields follow the caret, with improved folder creation and renaming"),
+    ]),
     ("0.2.3", &[
         ("更新下载支持断点续传，失败后保留进度并自动重试", "Update downloads resume interrupted transfers, preserve progress and retry automatically"),
         ("新增继续下载按钮，延长连接超时，避免网络中断后重新下载整个安装包", "Resume failed downloads with one click and allow more time to connect"),
@@ -36,6 +42,14 @@ const NOTES: &[(&str, &[(&str, &str)])] = &[
         ("新增慢变量图片、图注与代码样式，表格保持原配色并居中", "Manbianliang image, caption and code styles; centred tables keep their existing colours"),
         ("代码块支持基础自动缩进与括号内换行", "Basic automatic indentation and newlines inside bracket pairs in code blocks"),
         ("更新渠道切换为 yqhuang2912/quiet-md 的 GitHub Releases", "Updates now come from yqhuang2912/quiet-md on GitHub Releases"),
+    ]),
+    ("0.1.10", &[
+        ("Linux AppImage 支持应用内检查、下载并重启更新", "Check, download, and restart to update the Linux AppImage in the app"),
+        ("新建菜单可选择文档、Markdown 或文件夹，快捷新建支持记住上次类型", "Choose Document, Markdown, or Folder from the New menu; quick creation can remember your last choice"),
+        ("宽表格新增可拖动的横向滚动条", "Drag the horizontal scrollbar to navigate wide tables"),
+        ("Markdown 表格支持按列对齐，并在保存时保留对齐方式", "Align Markdown table columns and preserve alignment when saving"),
+        ("长输入框跟随光标滚动，修复链接等内容超出后看不到光标的问题", "Long input fields scroll with the caret, including link fields"),
+        ("调整文件夹按钮对齐，改善新建文件夹后的命名体验", "Align folder buttons and improve naming newly created folders"),
     ]),
     ("0.1.9", &[
         ("macOS：修复 ⌘Q 无法退出的问题，保留退出前的保存检查", "macOS: fix Cmd+Q not quitting, while keeping save checks before exit"),

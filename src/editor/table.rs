@@ -38,6 +38,8 @@ pub struct TableUi {
     /// When a moving drag last scrolled the page (it runs while the pointer
     /// stays near the page's top or bottom edge).
     pub scrolled: Option<Instant>,
+    /// Each table's sideways scroll and its scrollbar.
+    pub hscroll: RefCell<HashMap<BlockId, (ScrollHandle, Rc<super::scrollbar::Scrollbar>)>>,
 }
 
 pub type Stuck = Rc<RefCell<HashMap<BlockId, Bounds<Pixels>>>>;
@@ -792,6 +794,7 @@ impl R<'_> {
                 window.paint_quad(fill(Bounds::new(point(b.right() - px(1.), top), size(px(1.), h)), Theme::table_line()));
             }
         });
+        let (scroll, bar) = ed.tables.hscroll.borrow_mut().entry(id).or_insert_with(|| (ScrollHandle::new(), Default::default())).clone();
         div()
             .flex()
             .child(
@@ -812,13 +815,16 @@ impl R<'_> {
                             .pr(px(if centered { reach_r } else { reach_r - br }))
                             .pb(px(12.))
                             .overflow_x_scroll()
+                            .track_scroll(&scroll)
                             // Auto margins centre a fitting table in the text
                             // column (excluding the bars); oversized tables
                             // keep their left edge and horizontal scrolling.
                             .when(centered, |d| d.flex().items_start())
                             .child(grid.when(centered, |d| d.flex_none().mx_auto())),
                     )
-                    .child(edges.absolute().top_0().left_0().size_full()),
+                    .child(edges.absolute().top_0().left_0().size_full())
+                    // In the 12 below the cells, under the text column.
+                    .child(super::scrollbar::table_scrollbar(scroll, bar).absolute().left(px(reach)).right(px(reach_r)).bottom_0().h(px(12.))),
             )
             .into_any_element()
     }

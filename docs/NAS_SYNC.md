@@ -1,6 +1,6 @@
 # 个人版 NAS 同步
 
-本分支基于 [quiet-md](https://github.com/s1dashu/quiet-md) 的上游提交 `57884b9c8e49d22effe18885c6d717d8acb67278`（0.1.9 源码快照）。保留 Rust + GPUI 桌面端，新增可选 NAS 同步。个人改造在 `mynote` 分支持续维护，通过 `upstream/main` 合入原项目更新；`origin` 用于推送自己的 GitHub Fork。
+本分支已合入 [quiet-md 0.1.10](https://github.com/s1dashu/quiet-md/releases/tag/v0.1.10)，对应上游提交 `9dc5e5be3ae82e208cc91c126b33c5b09990edeb`。保留 Rust + GPUI 桌面端，新增可选 NAS 同步。个人改造在 `mynote` 分支持续维护，按上游稳定版标签合入原项目更新；`origin` 用于推送自己的 GitHub Fork。
 
 ## 第一版能力
 
@@ -119,14 +119,14 @@ git commit -m "feat: describe the change"
 git push origin mynote
 ```
 
-引入原项目更新前，先提交手头修改，确认 `git status` 干净。在已配置好 Rust 和 Windows SDK（Mac 为 Xcode Command Line Tools）的构建环境中运行：
+引入原项目更新前，先提交手头修改，确认 `git status` 干净。在已配置好 Rust 和 Windows SDK（Mac 为 Xcode Command Line Tools）的构建环境中运行。以下以稳定版 `v0.1.10` 为例；以后将两个标签中的版本一起换成要引入的版本，避免带入 `upstream/main` 尚未发布的改动：
 
 ```sh
 git switch mynote
-git fetch upstream
-git merge --no-commit --no-ff upstream/main
+git fetch --no-tags upstream main refs/tags/v0.1.10:refs/tags/upstream/v0.1.10
+git merge --no-commit --no-ff upstream/v0.1.10
 python scripts/check.py
-git commit -m "merge: sync upstream updates"
+git commit -m "merge: sync upstream v0.1.10"
 git push origin mynote
 ```
 

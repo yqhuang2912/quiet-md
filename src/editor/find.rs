@@ -16,6 +16,31 @@ pub struct Find {
     /// Hits in document order.
     pub matches: Vec<(BlockId, Range<usize>)>,
     pub current: Option<usize>,
+    /// A click or caret move in the document starts the next search there.
+    from_caret: bool,
+}
+
+impl Find {
+    fn step(&mut self, forward: bool, caret: Pos, order: impl Fn(BlockId) -> usize) {
+        let n = self.matches.len();
+        if n == 0 { return }
+        self.current = Some(if self.from_caret {
+            let anchor = (order(caret.block), caret.offset);
+            if forward {
+                self.matches.iter().position(|(id, r)| (order(*id), r.start) >= anchor).unwrap_or(0)
+            } else {
+                self.matches.iter().rposition(|(id, r)| (order(*id), r.start) < anchor).unwrap_or(n - 1)
+            }
+        } else {
+            match self.current {
+                Some(i) if forward => (i + 1) % n,
+                Some(i) => (i + n - 1) % n,
+                None if forward => 0,
+                None => n - 1,
+            }
+        });
+        self.from_caret = false;
+    }
 }
 
 /// Case-insensitive, non-overlapping hits of `q` in `text`, skipping inline objects.
@@ -57,7 +82,7 @@ impl Editor {
                 self.find_field.update(cx, |f, cx| f.set_text(&s, cx));
             }
         }
-        self.find = Some(Find { replace, matches: vec![], current: None });
+        self.find = Some(Find { replace, matches: vec![], current: None, from_caret: false });
         self.slash = None;
         self.menu = None;
         // 13pt inputs (the fields are made with the 14pt default).
@@ -77,8 +102,8 @@ impl Editor {
 
     pub fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(f) = self.find.take() else { return };
-        // Leave the current hit selected.
-        if let Some((id, r)) = f.current.and_then(|i| f.matches.get(i).cloned()) {
+        // Keep a newly placed caret; otherwise leave the current hit selected.
+        if !f.from_caret && let Some((id, r)) = f.current.and_then(|i| f.matches.get(i).cloned()) {
             self.core.block_sel = None;
             self.core.sel = Selection { anchor: Pos::new(id, r.start), head: Pos::new(id, r.end) };
             self.toolbar_hidden = true;
@@ -100,7 +125,7 @@ impl Editor {
             }
         }
         let order = |id: BlockId| units.iter().position(|u| u.id == id).unwrap_or(usize::MAX);
-        let anchor = if from_caret {
+        let anchor = if from_caret || old.from_caret {
             let h = self.core.ordered().0;
             Some((order(h.block), h.offset))
         } else {
@@ -111,7 +136,7 @@ impl Editor {
                 .and_then(|a| matches.iter().position(|(id, r)| (order(*id), r.start) >= a))
                 .unwrap_or(0)
         });
-        self.find = Some(Find { replace: old.replace, matches, current });
+        self.find = Some(Find { replace: old.replace, matches, current, from_caret: old.from_caret && !from_caret });
     }
 
     /// Hits inside one text line, for painting.
@@ -126,18 +151,16 @@ impl Editor {
     }
 
     fn step_find(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let units = self.core.units();
+        let caret = self.core.ordered().0;
         let Some(f) = &mut self.find else { return };
-        let n = f.matches.len();
-        if n == 0 {
-            return;
-        }
-        f.current = Some(match f.current {
-            Some(i) if forward => (i + 1) % n,
-            Some(i) => (i + n - 1) % n,
-            None => 0,
-        });
+        f.step(forward, caret, |id| units.iter().position(|u| u.id == id).unwrap_or(usize::MAX));
         self.scroll_to_current(window);
         cx.notify();
+    }
+
+    pub(super) fn find_caret_moved(&mut self) {
+        if let Some(f) = &mut self.find { f.from_caret = true; }
     }
 
     /// Bring the current hit into view (centered when it was off screen).
@@ -171,6 +194,7 @@ impl Editor {
     }
 
     fn replace_one(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.as_ref().is_some_and(|f| f.from_caret) { self.refresh_find(true, cx); }
         let Some((id, r)) = self.find.as_ref().and_then(|f| f.matches.get(f.current?).cloned()) else { return };
         let with = self.replace_field.read(cx).text.clone();
         self.core.checkpoint(EditKind::Other);
@@ -401,7 +425,8 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::find_in;
+    use super::{Find, find_in};
+    use super::super::core::Pos;
     use crate::model::*;
 
     #[test]
@@ -413,5 +438,49 @@ mod tests {
         assert_eq!(find_in(&t, "中文"), vec![15..21, 21..27]);
         assert!(find_in(&t, "\u{fffc}").is_empty());
         assert_eq!(find_in(&RichText::plain("aaa"), "aa"), vec![0..2]);
+    }
+
+    #[test]
+    fn find_next_follows_clicked_caret_then_continues_and_wraps() {
+        let id = BlockId(1);
+        let mut f = Find { replace: false, matches: vec![(id, 0..3), (id, 10..13), (id, 20..23)], current: Some(0), from_caret: true };
+        let caret = Pos::new(id, 8);
+        f.step(true, caret, |_| 0);
+        assert_eq!(f.current, Some(1));
+        f.step(true, caret, |_| 0);
+        assert_eq!(f.current, Some(2));
+        f.step(true, caret, |_| 0);
+        assert_eq!(f.current, Some(0));
+        // Clicking the very same position still resets the search origin.
+        f.from_caret = true;
+        f.step(true, caret, |_| 0);
+        assert_eq!(f.current, Some(1));
+        f.from_caret = true;
+        f.step(true, Pos::new(id, 11), |_| 0);
+        assert_eq!(f.current, Some(2));
+        f.from_caret = true;
+        f.step(true, Pos::new(id, 23), |_| 0);
+        assert_eq!(f.current, Some(0));
+    }
+
+    #[test]
+    fn find_previous_uses_document_order_and_wraps_from_caret() {
+        let (first, last) = (BlockId(9), BlockId(2));
+        let order = |id| if id == first { 0 } else { 1 };
+        let mut f = Find { replace: false, matches: vec![(first, 2..5), (last, 0..3), (last, 8..11)], current: Some(0), from_caret: true };
+        f.step(false, Pos::new(last, 8), order);
+        assert_eq!(f.current, Some(1));
+        f.step(false, Pos::new(last, 8), order);
+        assert_eq!(f.current, Some(0));
+        f.from_caret = true;
+        f.step(false, Pos::new(first, 0), order);
+        assert_eq!(f.current, Some(2));
+        f.from_caret = true;
+        f.step(true, Pos::new(last, 0), order);
+        assert_eq!(f.current, Some(1));
+        f.matches.clear();
+        f.current = None;
+        f.step(false, Pos::new(first, 0), order);
+        assert_eq!(f.current, None);
     }
 }
