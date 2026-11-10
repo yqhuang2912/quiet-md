@@ -1,6 +1,6 @@
 {
-  "version": "0.2.2",
-  "url": "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.2/quiet-md-0.2.2-windows-x64-setup.exe",
-  "size": 13914685,
-  "signature": "untrusted comment: signature from minisign secret key\nRURzCtbWOJNdr6Gm57CKKiiHO0UnJoqGEyv2dCZ3gzWgPN8gf0jvQE+79kEeImURVic1gYTcmLGaJa6Ts31UjGBSwtNC0n1uYw0=\ntrusted comment: quiet-md-0.2.2-windows-x64-setup.exe\n+ZaaOeESg/X7lWeG0nWi7/oDjJHWBpEiIVeUYsQJL72O/vRd7FQy1nSp40WGMWOnv6wWctLSDYBqm7Vqdg/HBg==\n"
+  "version": "0.2.3",
+  "url": "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.3/quiet-md-0.2.3-windows-x64-setup.exe",
+  "size": 13949919,
+  "signature": "untrusted comment: signature from minisign secret key\nRURzCtbWOJNdr2UkaErnTTzIQiHMLj02WBRz0CMFCm3rA9rZU6i7K1JoyctgCAnYqtNiSYj+tMcgqGnuNYte79Sp6WGVLbBTSgo=\ntrusted comment: quiet-md-0.2.3-windows-x64-setup.exe\naoBzVZcOwd/DM3TXNfkGvRouKBB0zsD5ylvw/1KGSIfQRtaiLXHFJiob3375glHmDa9QKj9OSx0hovUVimW3BQ==\n"
 }
