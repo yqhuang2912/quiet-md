@@ -180,6 +180,7 @@ mod tests {
                         Err(e) => panic!("{e}"),
                     }
                 };
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut request = vec![];
                 while !request.ends_with(b"\r\n\r\n") {
