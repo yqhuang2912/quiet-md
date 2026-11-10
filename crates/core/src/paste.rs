@@ -991,7 +991,7 @@ fn md_blocks(lines: &[&str], off: Off, mut spans: Option<&mut Vec<(usize, usize)
             }
             continue;
         }
-        if let Some((t, n)) = pipe_table(&lines[i..]) {
+        if let Some((t, n)) = pipe_table(&lines[i..], off) {
             out.push(t);
             i += n;
             continue;
@@ -1016,12 +1016,64 @@ fn md_blocks(lines: &[&str], off: Off, mut spans: Option<&mut Vec<(usize, usize)
 
 /// `![alt](src "title")` filling the whole line: its alt and src.
 fn image_line(s: &str) -> Option<(&str, &str)> {
+    let (alt, src, used) = image_at(s)?;
+    (used == s.len()).then_some((alt, src))
+}
+
+/// An image at the start of a line or table cell; escaped brackets are alt text.
+fn image_at(s: &str) -> Option<(&str, &str, usize)> {
     let rest = s.strip_prefix("![")?;
-    let (alt, tail) = rest.split_once("](")?;
-    let inner = tail.strip_suffix(')')?;
-    let src = inner.split_once([' ', '\t']).map_or(inner, |(a, _)| a);
-    let src = src.trim_start_matches('<').trim_end_matches('>');
-    (!src.is_empty() && !inner.contains(')')).then_some((alt, src))
+    let mut chars = rest.char_indices();
+    let mut depth = 0;
+    let close = loop {
+        let (i, c) = chars.next()?;
+        match c {
+            '\\' => { chars.next(); }
+            '[' => depth += 1,
+            ']' if depth == 0 => break i,
+            ']' => depth -= 1,
+            _ => {}
+        }
+    };
+    let inner = rest[close + 1..].strip_prefix('(')?;
+    let end = inner.find(')')?;
+    let src = inner[..end].trim().split_once([' ', '\t']).map_or(inner[..end].trim(), |(a, _)| a).trim_matches(['<', '>']);
+    (!src.is_empty()).then_some((&rest[..close], src, 2 + close + 2 + end + 1))
+}
+
+/// Images are blocks in our model, including between text runs in a cell.
+fn md_cell(s: &str, off: Off) -> Vec<Block> {
+    if !off.file { return vec![Block::new(BlockKind::Text, md_inline(s))] }
+    let mut blocks = vec![];
+    let (mut start, mut i) = (0, 0);
+    while i < s.len() {
+        let rest = &s[i..];
+        let c = rest.chars().next().unwrap();
+        if c == '\\' {
+            i += 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+            continue;
+        }
+        if c == '`' {
+            let n = rest.bytes().take_while(|c| *c == b'`').count();
+            i += find_run(&rest[n..], &rest[..n], b'`').map_or(n, |end| n + end + n);
+            continue;
+        }
+        let image = image_at(rest);
+        let br = ["<br>", "<br/>", "<br />"].into_iter().find(|br| rest.starts_with(br));
+        if image.is_some() || br.is_some() {
+            if i > start { blocks.push(Block::new(BlockKind::Text, md_inline(&s[start..i]))); }
+            if let Some((alt, src, used)) = image {
+                let caption = (off.alt && !alt.is_empty()).then(|| md_inline(alt).text);
+                let mut b = Block::new(BlockKind::Image { src_kind: "src".into(), src: src.into(), width: None, height: None, caption, crop: None }, RichText::default());
+                b.align = Align::Center;
+                blocks.push(b);
+                i += used;
+            } else { i += br.unwrap().len(); }
+            start = i;
+        } else { i += c.len_utf8(); }
+    }
+    if start < s.len() || blocks.is_empty() { blocks.push(Block::new(BlockKind::Text, md_inline(&s[start..]))); }
+    blocks
 }
 
 fn quote_line(s: &str) -> Option<&str> {
@@ -1056,7 +1108,7 @@ fn table_cells(line: &str) -> Vec<String> {
 }
 
 /// GFM pipe table at the start of `lines`: (table, lines used).
-fn pipe_table(lines: &[&str]) -> Option<(Block, usize)> {
+fn pipe_table(lines: &[&str], off: Off) -> Option<(Block, usize)> {
     let head = lines.first()?;
     let sep = lines.get(1)?;
     if !head.contains('|') {
@@ -1097,9 +1149,9 @@ fn pipe_table(lines: &[&str]) -> Option<(Block, usize)> {
         .map(|r| {
             (0..ncols)
                 .map(|c| {
-                    let mut b = Block::new(BlockKind::Text, md_inline(r.get(c).map_or("", String::as_str)));
-                    b.align = aligns[c];
-                    TableCell { blocks: vec![b], ..TableCell::empty() }
+                    let mut blocks = md_cell(r.get(c).map_or("", String::as_str), off);
+                    for b in &mut blocks { if b.kind.has_text() { b.align = aligns[c]; } }
+                    TableCell { blocks, ..TableCell::empty() }
                 })
                 .collect()
         })

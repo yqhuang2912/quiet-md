@@ -1114,6 +1114,56 @@ mod tests {
     }
 
     #[test]
+    fn table_images_survive_save_and_reopen_in_all_document_formats() {
+        use crate::editor::core::{Core, Pos, Selection};
+        use crate::model::{Block, BlockKind, RichText};
+        for format in ["xml", "md", "local"] {
+            let lib = Lib::new("table-images");
+            let mut store = lib.open();
+            let source = "assets/1a2b3c4d-图 100% (1).png";
+            std::fs::create_dir_all(lib.0.join("assets")).unwrap();
+            std::fs::write(lib.0.join(source), b"image bytes").unwrap();
+            let initial = docxml::parse("<title>Table</title><table><tr><th><p>Header</p></th></tr><tr><td><p></p></td></tr></table>").unwrap();
+            let id = match format {
+                "xml" => store.create_from(&initial).unwrap(),
+                "md" => store.create_markdown(&initial, "").unwrap(),
+                _ => {
+                    let path = lib.0.join("outside/Table.md");
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, crate::markdown::write_file(&initial, "", None)).unwrap();
+                    store.open_local(&path).unwrap()
+                }
+            };
+            let mut core = Core::new(store.load_for_edit(&id, false).unwrap());
+            let BlockKind::Table(t) = &core.doc.blocks[0].kind else { panic!() };
+            let cell = t.rows[1][0].blocks[0].id;
+            core.sel = Selection::caret(Pos::new(cell, 0));
+            let mut image = Block::new(BlockKind::Image { src_kind: "src".into(), src: source.into(), width: Some(120.), height: Some(80.), caption: Some("图 [1] | 示例".into()), crop: None }, RichText::default());
+            image.align = crate::model::Align::Center;
+            let image_id = core.insert_block(image);
+            let after = core.ensure_paragraph_after(image_id);
+            core.sel = Selection::caret(Pos::new(after, 0));
+            core.insert_text("after image");
+            assert!(core.is_in_table(image_id));
+            store.save(&id, &core.doc).unwrap();
+            drop(store);
+            let mut store = lib.open();
+            let reloaded = store.load_for_edit(&id, false).unwrap();
+            let BlockKind::Table(t) = &reloaded.blocks[0].kind else { panic!() };
+            let cell = &t.rows[1][0].blocks;
+            let images: Vec<_> = cell.iter().filter_map(|b| match &b.kind { BlockKind::Image { src, caption, .. } => Some((src, caption)), _ => None }).collect();
+            assert_eq!(images.len(), 1, "{format}: {:?}", cell);
+            assert_eq!(images[0].1.as_deref(), Some("图 [1] | 示例"));
+            let path = lib.0.join(images[0].0);
+            assert_eq!(std::fs::read(&path).unwrap_or_else(|e| panic!("{format}: {}: {e}", path.display())), b"image bytes");
+            assert!(cell.iter().any(|b| b.text.text == "after image"));
+            // Saving a reopened document must not drop the image on the next reopen.
+            store.save(&id, &reloaded).unwrap();
+            assert_eq!(store.load(&id).unwrap().asset_sources(), reloaded.asset_sources());
+        }
+    }
+
+    #[test]
     fn local_files_are_edited_in_place_and_never_trashed() {
         let lib = Lib::new("local");
         let dir = lib.0.join("outside");

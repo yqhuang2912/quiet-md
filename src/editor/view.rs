@@ -1671,7 +1671,7 @@ impl Editor {
             return;
         }
         if !self.core.in_block_mode() && self.core.is_code(self.core.sel.head.block) {
-            self.core.insert_text("    ");
+            self.core.code_tab(false);
         } else if self.core.in_block_mode() || !self.core.cell_step(true) {
             self.core.indent();
         }
@@ -1683,16 +1683,7 @@ impl Editor {
             return;
         }
         if !self.core.in_block_mode() && self.core.is_code(self.core.sel.head.block) {
-            // Remove up to 4 leading spaces of the current line.
-            let h = self.core.sel.head;
-            let text = self.core.text_of(h.block).map(|t| t.text.clone()).unwrap_or_default();
-            let ls = text[..h.offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let n = text[ls..].chars().take(4).take_while(|c| *c == ' ').count();
-            if n > 0 {
-                self.core.checkpoint(core::EditKind::Other);
-                self.core.text_mut(h.block).unwrap().replace(ls..ls + n, &RichText::default());
-                self.core.sel = Selection::caret(Pos::new(h.block, h.offset.saturating_sub(n).max(ls)));
-            }
+            self.core.code_tab(true);
         } else if self.core.in_block_mode() || !self.core.cell_step(false) {
             self.core.outdent();
         }

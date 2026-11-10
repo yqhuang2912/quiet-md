@@ -1480,6 +1480,39 @@ impl Core {
 
     // ---- indentation
 
+    /// Tab / Shift+Tab inside code: change all touched lines, keeping the selection.
+    pub fn code_tab(&mut self, outdent: bool) {
+        let (a, h) = (self.sel.anchor, self.sel.head);
+        if self.in_block_mode() || self.cell_sel.is_some() || a.block != h.block || !self.is_code(h.block) { return }
+        if !outdent && self.sel.is_collapsed() {
+            self.insert_text("    ");
+            return;
+        }
+        let text = &self.text_of(h.block).unwrap().text;
+        let (start, end) = (a.offset.min(h.offset), a.offset.max(h.offset));
+        let first = text[..start].rfind('\n').map_or(0, |i| i + 1);
+        let mut edits = vec![];
+        let mut at = first;
+        loop {
+            let n = if !outdent { 0 } else if text[at..].starts_with('\t') { 1 }
+                else { text[at..].bytes().take(4).take_while(|c| *c == b' ').count() };
+            if !outdent || n > 0 { edits.push((at, n)); }
+            let Some(next) = text[at..].find('\n').map(|i| at + i + 1) else { break };
+            // A selection ending at the next line's start does not include that line.
+            if next >= end { break }
+            at = next;
+        }
+        if edits.is_empty() { return }
+        self.checkpoint(EditKind::Other);
+        let ins = RichText::plain(if outdent { "" } else { "    " });
+        for (at, n) in edits.into_iter().rev() {
+            self.text_mut(h.block).unwrap().replace(at..at + n, &ins);
+            for pos in [&mut self.sel.anchor, &mut self.sel.head] {
+                if pos.offset >= at { pos.offset = pos.offset.saturating_sub(n).max(at) + ins.len(); }
+            }
+        }
+    }
+
     /// Blocks touched by the selection that are "top-most" (no ancestor also selected).
     pub fn selected_blocks(&self) -> Vec<BlockId> {
         if self.block_sel.is_some() {
@@ -3523,6 +3556,48 @@ mod tests {
             assert_eq!(c.sel.head, Pos::new(b, at));
             c.redo();
             assert_eq!(xml(&c), changed);
+        }
+    }
+
+    #[test]
+    fn code_tab_edits_selected_lines_and_keeps_selection_and_history() {
+        fn marked(s: &str, b: BlockId) -> (String, Selection) {
+            let anchor = s.find('|').unwrap();
+            let s = s.replacen('|', "", 1);
+            let head = s.find('|').unwrap();
+            (s.replacen('|', "", 1), Selection { anchor: Pos::new(b, anchor), head: Pos::new(b, head) })
+        }
+        for (outdent, before, after) in [
+            (true, "    |one\n        中文\n    three|", "|one\n    中文\nthree|"),
+            (true, "|    one\n    two\n|    untouched", "|one\ntwo\n|    untouched"),
+            (true, "|\tone\n  two\nzero\n    |three", "|one\ntwo\nzero\n|three"),
+            (true, "  ||  one\n    two", "||one\n    two"),
+            (true, "    one\n\t中||文", "    one\n中||文"),
+            (true, "|one\ntwo|", "|one\ntwo|"),
+            (false, "|one\n中文\n|next", "    |one\n    中文\n|next"),
+            (false, "o|ne\ntw|o", "    o|ne\n    tw|o"),
+            (false, "||", "    ||"),
+        ] {
+            for reverse in [false, true] {
+                let mut c = doc("<pre><code></code></pre>");
+                let b = c.doc.blocks[0].id;
+                let (text, mut sel) = marked(before, b);
+                let (expected, mut expected_sel) = marked(after, b);
+                if reverse { std::mem::swap(&mut sel.anchor, &mut sel.head); std::mem::swap(&mut expected_sel.anchor, &mut expected_sel.head); }
+                *c.text_mut(b).unwrap() = RichText::plain(&text);
+                c.sel = sel;
+                c.code_tab(outdent);
+                assert_eq!(c.text_of(b).unwrap().text, expected, "{before}");
+                assert_eq!(c.sel, expected_sel, "{before}");
+                assert!(c.text_of(b).unwrap().runs.iter().all(|r| r.marks == Marks::default()));
+                assert_eq!(xml(&doc(&xml(&c))), xml(&c));
+                c.undo();
+                assert_eq!(c.text_of(b).unwrap().text, text);
+                assert_eq!(c.sel, sel);
+                c.redo();
+                assert_eq!(c.text_of(b).unwrap().text, expected);
+                assert_eq!(c.sel, expected_sel);
+            }
         }
     }
 

@@ -15,6 +15,11 @@ const RADIUS: f32 = 12.;
 /// Each version's notes: (version, [(中文, English)]). Only the running
 /// version's are shown; a version without notes shows nothing.
 const NOTES: &[(&str, &[(&str, &str)])] = &[
+    ("0.2.2", &[
+        ("代码块支持对选中的多行统一增加或减少缩进，保留选区并支持撤销", "Indent or outdent selected code lines together, preserving the selection and undo history"),
+        ("修复 Markdown 表格中的图片保存、重新打开和导出时丢失的问题", "Keep images in Markdown tables when saving, reopening and exporting"),
+        ("修复本地图片文件名含空格、括号或百分号时的路径还原", "Restore local image paths containing spaces, parentheses or percent signs"),
+    ]),
     ("0.2.1", &[
         ("新文档库保持空白，不再自动创建指南或示例文档", "New libraries start empty without guides or sample documents"),
         ("Windows 安装时选择文档库位置，macOS 首次启动确认，升级时保留选择", "Choose storage during Windows installation or first launch on macOS; updates keep your choice"),

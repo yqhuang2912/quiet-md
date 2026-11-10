@@ -132,11 +132,11 @@ impl Writer<'_> {
             BlockKind::Image { src, caption, .. } => match self.opts.assets {
                 Some(dir) => {
                     let alt = caption.clone().unwrap_or_default();
-                    format!("![{}]({})", escape(&alt), self.image(src, dir).replace(' ', "%20"))
+                    format!("![{}]({})", escape(&alt), link_target(&self.image(src, dir)))
                 }
                 None => String::new(),
             },
-            BlockKind::Table(t) => table(t, &mut |f| self.file_link(f)),
+            BlockKind::Table(t) => table(t, &mut |b| self.cell_block(b)),
             BlockKind::Grid | BlockKind::Column { .. } => self.blocks(&b.children),
             // An add-on block: Markdown has nothing for it.
             BlockKind::Countdown(_) => String::new(),
@@ -149,6 +149,15 @@ impl Writer<'_> {
                 (text, _) => escape(&text).replace('\n', "<br>"),
             },
         }
+    }
+
+    fn cell_block(&mut self, b: &Block) -> String {
+        let text = match b.kind {
+            BlockKind::Image { .. } | BlockKind::File(_) => self.block(b, 0),
+            _ => inline(&b.text, &mut |f| self.file_link(f)),
+        };
+        std::iter::once(text).chain(b.children.iter().map(|b| self.cell_block(b)))
+            .filter(|s| !s.is_empty()).collect::<Vec<_>>().join("<br>").replace('\n', "<br>")
     }
 
     fn file_link(&mut self, file: &FileBlock) -> Option<String> {
@@ -241,6 +250,7 @@ impl Writer<'_> {
 
 /// A link target that survives the parser: spaces and parentheses escaped.
 fn link_target(s: &str) -> String {
+    let s = if !s.contains("://") && !s.starts_with("data:") { s.replace('%', "%25") } else { s.to_string() };
     s.replace(' ', "%20").replace('(', "%28").replace(')', "%29")
 }
 
@@ -308,9 +318,7 @@ pub fn parse_file(text: &str, title: &str, base: Option<&Path>) -> Document {
     let text = text.trim_start_matches('\u{feff}');
     let (_, body) = front_matter(text);
     let mut blocks = crate::paste::markdown_to_blocks(body, crate::paste::Off { file: true, alt: true, ..Default::default() });
-    if let Some(dir) = base {
-        resolve_images(&mut blocks, dir);
-    }
+    resolve_images(&mut blocks, base.unwrap_or(Path::new("")));
     if blocks.is_empty() {
         blocks.push(Block::text(""));
     }
@@ -354,7 +362,7 @@ fn preserve(original: &str, pieces: &[Piece], opts: &Options, strict: bool) -> S
     let norm = body.replace("\r\n", "\n");
     let (mut blocks, spans) = crate::paste::markdown_to_blocks_with_lines(&norm, crate::paste::Off { file: true, alt: true, ..Default::default() });
     if blocks.len() != spans.len() { return joined(pieces); }
-    if let Some(dir) = opts.base { resolve_images(&mut blocks, dir); }
+    resolve_images(&mut blocks, opts.base.unwrap_or(Path::new("")));
     // The file's blocks as written now, each with the lines it came from.
     let mut old: Vec<(String, (usize, usize))> = vec![];
     {
@@ -442,7 +450,7 @@ fn joined(pieces: &[Piece]) -> String {
 /// Whether `body` reads back as the blocks that were written as `canonical`.
 fn reads_as(body: &str, canonical: &str, opts: &Options) -> bool {
     let mut blocks = crate::paste::markdown_to_blocks(body, crate::paste::Off { file: true, alt: true, ..Default::default() });
-    if let Some(dir) = opts.base { resolve_images(&mut blocks, dir); }
+    resolve_images(&mut blocks, opts.base.unwrap_or(Path::new("")));
     let mut w = Writer { opts, files: vec![], missing: 0 };
     joined(&w.pieces(&blocks)) == canonical
 }
@@ -475,10 +483,10 @@ fn match_pieces(old: &[&str], new: &[&str]) -> Vec<Option<usize>> {
     out
 }
 
-fn table(t: &Table, files: &mut impl FnMut(&FileBlock) -> Option<String>) -> String {
+fn table(t: &Table, block: &mut impl FnMut(&Block) -> String) -> String {
     let cols = t.rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
     let mut cell = |c: &TableCell| {
-        let parts: Vec<String> = c.blocks.iter().map(|b| inline(&b.text, files)).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<String> = c.blocks.iter().map(&mut *block).filter(|s| !s.is_empty()).collect();
         parts.join("<br>").replace('|', "\\|")
     };
     let mut row = |r: &Vec<TableCell>| {
@@ -750,9 +758,39 @@ mod tests {
     }
 
     #[test]
+    fn table_images_round_trip_and_export_asset_copies() {
+        let root = std::env::temp_dir().join(format!("quiet-table-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/pic (1).png"), b"image").unwrap();
+        let doc = crate::docxml::parse("<table><tr><th><p>Header</p><img src=\"assets/pic (1).png\" caption=\"图 [1] | 例\"/></th></tr><tr><td><p>before</p><img src=\"assets/pic (1).png\"/><img src=\"https://example.com/a.png\"/><p>after</p></td></tr></table>").unwrap();
+        let out = export(&doc, &Options { assets: Some("page.assets"), library_root: Some(&root), ..Default::default() });
+        assert_eq!(out.files.len(), 1);
+        assert_eq!(out.missing, 0);
+        assert_eq!(out.text.matches("page.assets/pic%20%281%29.png").count(), 2);
+        let again = parse_file(&out.text, "page", Some(&root));
+        assert_eq!(again.asset_sources().len(), 3, "{}", out.text);
+        assert_eq!(write_file(&again, "", Some(&root)), out.text);
+        let plain = export(&doc, &Options { library_root: Some(&root), ..Default::default() });
+        assert!(plain.files.is_empty());
+        assert!(!plain.text.contains("!["));
+        assert!(plain.text.contains("before<br>after"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn table_images_between_text_and_literal_image_syntax() {
+        let src = "| Images | Literal |\n| --- | --- |\n| before ![图](assets/a.png) after<br>![](assets/b.png) | `![code](assets/c.png)` and \\![escaped](assets/d.png) |\n";
+        let doc = parse_file(src, "page", None);
+        assert_eq!(doc.asset_sources(), ["assets/a.png", "assets/b.png"]);
+        let out = write_file(&doc, "", None);
+        assert_eq!(parse_file(&out, "page", None).asset_sources(), doc.asset_sources());
+        assert!(out.contains("`![code](assets/c.png)`"));
+    }
+
+    #[test]
     fn exports_tables() {
         let cell = |s: &str| TableCell { blocks: vec![Block::text(s)], ..TableCell::empty() };
         let t = Table { col_widths: vec![], header_rows: 1, header_col: false, rows: vec![vec![cell("a"), cell("b|c")], vec![cell("1")]] };
-        assert_eq!(table(&t, &mut |_| None), "| a | b\\|c |\n| --- | --- |\n| 1 |  |");
+        assert_eq!(table(&t, &mut |b| inline(&b.text, &mut |_| None)), "| a | b\\|c |\n| --- | --- |\n| 1 |  |");
     }
 }
