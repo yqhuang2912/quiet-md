@@ -15,17 +15,19 @@
 //! build time with `QUIET_MD_UPDATE_PUBKEY`.
 
 use gpui::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+mod transfer;
 
 pub const REPOSITORY: &str = "yqhuang2912/quiet-md";
 const RELEASES: &str = "https://github.com/yqhuang2912/quiet-md/releases";
 const BASE: &str = "https://raw.githubusercontent.com/yqhuang2912/quiet-md/updates";
 const KEY: &str = match option_env!("QUIET_MD_UPDATE_PUBKEY") { Some(k) => k, None => include_str!("../packaging/mynote-update-key.pub") };
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Manifest {
     pub version: String,
     pub url: String,
@@ -45,6 +47,7 @@ pub enum State {
     NotPublished,
     Available(Manifest),
     Downloading(Manifest),
+    DownloadFailed(Manifest, String),
     /// Verified and unpacked: the new `.app` (macOS) or the installer (Windows).
     Ready(Manifest, PathBuf),
     /// The helper waits for this process to exit (a failed save may have kept it open).
@@ -134,7 +137,7 @@ pub fn progress(m: &Manifest) -> f32 {
 
 /// Downloads and verifies the version on offer.
 pub fn download(cx: &mut App) {
-    let State::Available(m) = state(cx) else { return };
+    let m = match state(cx) { State::Available(m) | State::DownloadFailed(m, _) => m, _ => return };
     set(State::Downloading(m.clone()), cx);
     // Redraw the progress (read off the partial file) while the download runs.
     cx.spawn(async |cx| loop {
@@ -144,7 +147,7 @@ pub fn download(cx: &mut App) {
     let task = cx.background_executor().spawn({ let m = m.clone(); async move { fetch_package(&m) } });
     cx.spawn(async move |cx| {
         let result = task.await;
-        let _ = cx.update(|cx| set(match result { Ok(path) => State::Ready(m, path), Err(e) => State::Failed(e) }, cx));
+        let _ = cx.update(|cx| set(match result { Ok(path) => State::Ready(m, path), Err(e) => State::DownloadFailed(m, e) }, cx));
     }).detach();
 }
 
@@ -242,24 +245,17 @@ fn fetch_package(m: &Manifest) -> Result<PathBuf, String> {
     let platform = platform().ok_or("platform")?;
     let name = package_name(&m.version, platform);
     let dir = updates_dir();
-    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join(&name);
-    let part = dir.join(format!("{name}.part"));
-    // curl gets no path: a Windows curl.exe reads its arguments in the ANSI
-    // code page, which cannot spell every user folder name (中文 included).
-    let out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-    curl_to(&["--max-time", "900", &m.url], Stdio::from(out))?;
-    let bytes = std::fs::read(&part).map_err(|e| e.to_string())?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("download.lock")).map_err(|e| e.to_string())?;
+    lock.try_lock().map_err(|_| crate::settings::tr("另一个实例正在下载更新，请稍后重试", "Another instance is downloading an update. Try again shortly.").to_string())?;
+    let key = public_key().ok_or("update key")?;
+    let file = transfer::fetch(m, &name, &dir, &key)?;
+    #[cfg(target_os = "macos")]
     let failed = |what: &str| format!("{}: {what}", crate::settings::tr("更新包校验失败", "The update package failed verification"));
-    if bytes.len() as u64 != m.size { return Err(failed("size")) }
-    let key = public_key().ok_or_else(|| failed("key"))?;
-    if !signed(&bytes, &m.signature, &name, &key) { return Err(failed("signature")) }
-    drop(bytes);
-    std::fs::rename(&part, &file).map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
     {
-        let unpacked = dir.join("app");
+        let unpacked = dir.join(format!("app-{}-{platform}", m.version));
+        if unpacked.exists() { std::fs::remove_dir_all(&unpacked).map_err(|e| e.to_string())?; }
         run(Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(&file).arg(&unpacked))?;
         let app = unpacked.join("quiet.md.app");
         run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&app)).map_err(|_| failed("codesign"))?;
@@ -268,19 +264,16 @@ fn fetch_package(m: &Manifest) -> Result<PathBuf, String> {
         // personal builds may update to another verified ad-hoc build.
         let mine = app_bundle().and_then(|a| team(&a));
         if team(&app) != mine { return Err(failed("team")) }
-        let _ = std::fs::remove_file(&file);
         Ok(app)
     }
     #[cfg(not(target_os = "macos"))]
     Ok(file)
 }
 
-fn protocols() -> &'static str { if override_url().is_some() { "=https,http" } else { "=https" } }
-
 /// A missing latest asset is a fresh channel, not an up-to-date application.
 fn curl_manifest(url: &str, testing: bool) -> Result<Option<Vec<u8>>, String> {
     let protocols = if testing { "=https,http" } else { "=https" };
-    let out = command("curl").args(["-sSL", "--proto", protocols, "--proto-redir", protocols, "--connect-timeout", "15", "--max-time", "20", "--max-filesize", "1048576", "--write-out", "\n%{http_code}", url])
+    let out = transfer::curl(url).args(["-sSL", "--proto", protocols, "--proto-redir", protocols, "--connect-timeout", "60", "--max-time", "90", "--max-filesize", "1048576", "--write-out", "\n%{http_code}", url])
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() { return Err(curl_error(&out.stderr)) }
     let at = out.stdout.iter().rposition(|b| *b == b'\n').ok_or("Missing HTTP status")?;
@@ -294,15 +287,6 @@ fn curl_manifest(url: &str, testing: bool) -> Result<Option<Vec<u8>>, String> {
 fn curl_error(stderr: &[u8]) -> String {
     let msg = String::from_utf8_lossy(stderr).trim().trim_start_matches("curl: ").to_string();
     format!("{}: {msg}", crate::settings::tr("无法连接更新服务器", "Could not reach the update server"))
-}
-
-/// `stdout`: piped (returned) or a file to download into.
-fn curl_to(args: &[&str], stdout: Stdio) -> Result<Vec<u8>, String> {
-    let out = command("curl").args(["-fsSL", "--proto", protocols(), "--proto-redir", protocols(), "--connect-timeout", "15"]).args(args)
-        .stdin(Stdio::null()).stdout(stdout).stderr(Stdio::piped()).output()
-        .map_err(|e| format!("curl: {e}"))?;
-    if out.status.success() { return Ok(out.stdout) }
-    Err(curl_error(&out.stderr))
 }
 
 /// A command that opens no console window on Windows.
@@ -410,8 +394,8 @@ mod tests {
     }
 
     // A throwaway key (not the release key) and its signature of b"quiet.md" as quiet-md-0.2.0-macos-arm64.zip.
-    const TEST_KEY: &str = "RWTh6tW62t9YuAQn7kot+dQgLqLst7Y75FmIEJTHVhcBtN0WXRpyTuPV";
-    const TEST_SIG: &str = "untrusted comment: signature from minisign secret key
+    pub(super) const TEST_KEY: &str = "RWTh6tW62t9YuAQn7kot+dQgLqLst7Y75FmIEJTHVhcBtN0WXRpyTuPV";
+    pub(super) const TEST_SIG: &str = "untrusted comment: signature from minisign secret key
 RUTh6tW62t9YuELfpasf2JJ5CdktflamMcMROwLwYH7Ps6KTTQ/OUvViqT/c+L9PB1Egk9FoQqb94hk+x00y66OvPsdZOwwMww4=
 trusted comment: quiet-md-0.2.0-macos-arm64.zip
 FuE4L1zQnqL1nA/5xffpEtZyK2ca882Q1joA5X11poZ1xezdAlEMfn/36MJc5C60clQFec4vQf66MoxPi+AZCA==

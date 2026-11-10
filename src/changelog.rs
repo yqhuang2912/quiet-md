@@ -15,6 +15,11 @@ const RADIUS: f32 = 12.;
 /// Each version's notes: (version, [(中文, English)]). Only the running
 /// version's are shown; a version without notes shows nothing.
 const NOTES: &[(&str, &[(&str, &str)])] = &[
+    ("0.2.3", &[
+        ("更新下载支持断点续传，失败后保留进度并自动重试", "Update downloads resume interrupted transfers, preserve progress and retry automatically"),
+        ("新增继续下载按钮，延长连接超时，避免网络中断后重新下载整个安装包", "Resume failed downloads with one click and allow more time to connect"),
+        ("更新器读取 Windows 和 macOS 的手动系统代理设置，保持完整签名校验", "The updater uses manual system proxy settings on Windows and macOS and still verifies every package signature"),
+    ]),
     ("0.2.2", &[
         ("代码块支持对选中的多行统一增加或减少缩进，保留选区并支持撤销", "Indent or outdent selected code lines together, preserving the selection and undo history"),
         ("修复 Markdown 表格中的图片保存、重新打开和导出时丢失的问题", "Keep images in Markdown tables when saving, reopening and exporting"),

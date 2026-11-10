@@ -807,6 +807,7 @@ pub(crate) fn update_pill(cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let state = crate::update::state(cx);
     let (label, tip) = match &state {
         State::Available(m) => (tr("更新", "Update").to_string(), crate::localized_format!("下载 Quiet.md {}", "Download Quiet.md {}", m.version)),
+        State::DownloadFailed(_, _) => (tr("重试", "Retry").to_string(), tr("继续下载更新", "Resume update download").to_string()),
         State::Downloading(m) => (format!("{:.0}%", crate::update::progress(m) * 100.), crate::localized_format!("正在下载 {}…", "Downloading {}…", m.version)),
         State::Ready(m, _) => (tr("重启更新", "Restart").to_string(), crate::localized_format!("重启后更新到 {}，打开的文档会先保存", "Restart into {}; open documents are saved first", m.version)),
         State::Installing(m) => (tr("即将更新", "Updating").to_string(), crate::localized_format!("Quiet.md 退出后安装 {}", "{} installs when Quiet.md quits", m.version)),
@@ -823,7 +824,7 @@ pub(crate) fn update_pill(cx: &mut Context<Workspace>) -> Option<AnyElement> {
         .when_some(fill, |d, f| d.w(px(56.)).child(ui::wave_fill(f, Theme::primary().opacity(0.18))))
         .child(div().relative().min_w_0().truncate().child(label))
         .tip(&tip, None)
-        .on_click(move |_, _, cx| match &state { State::Available(_) => crate::update::download(cx), State::Ready(..) => crate::update::install(cx), _ => {} })
+        .on_click(move |_, _, cx| match &state { State::Available(_) | State::DownloadFailed(..) => crate::update::download(cx), State::Ready(..) => crate::update::install(cx), _ => {} })
         .into_any_element())
 }
 
@@ -842,10 +843,12 @@ fn update_row(cx: &mut Context<Workspace>) -> Div {
         State::Ready(m, _) => (crate::localized_format!("{} 已准备好", "{} is ready to install", m.version).into(), desc(tr("重启后完成更新，打开的文档会先保存。", "Quiet.md restarts to finish; open documents are saved first."))),
         State::Installing(m) => (crate::localized_format!("{} 将在退出后安装", "{} installs when Quiet.md quits", m.version).into(), None),
         State::Failed(e) => (tr("更新失败", "Update failed").into(), Some(e.clone().into())),
+        State::DownloadFailed(_, e) => (tr("更新失败", "Update failed").into(), Some(e.clone().into())),
     };
     let control = match &state {
         State::Checking | State::Downloading(_) | State::Installing(_) => None,
         State::Available(_) => Some(button("update-download", tr("下载更新", "Download")).on_click(|_, _, cx| crate::update::download(cx))),
+        State::DownloadFailed(..) => Some(button("update-download", tr("继续下载", "Resume download")).on_click(|_, _, cx| crate::update::download(cx))),
         State::Ready(..) => Some(button("update-install", tr("重启以更新", "Restart to Update")).on_click(|_, _, cx| crate::update::install(cx))),
         _ => Some(button("update-check", tr("检查更新", "Check Now")).on_click(|_, _, cx| crate::update::check(true, cx))),
     };
