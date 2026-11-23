@@ -1,6 +1,7 @@
 //! Single-line text field used for search, link URLs and the code language
 //! picker. Rendering reuses the editor's rich text element.
 
+use crate::editor::core::{next_word, prev_word};
 use crate::editor::text::{LayoutCache, RichTextElement, TextSpec};
 use crate::model::{Align, BlockId, RichText};
 use crate::theme::Theme;
@@ -12,7 +13,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
     field,
-    [Backspace, DeleteToHome, Delete, Left, Right, SelectLeft, SelectRight, Home, End, SelectAll, Copy, Cut, Paste, Submit, ShiftSubmit, Cancel, Up, Down, Swallow, Tab, ShiftTab]
+    [Backspace, DeleteToHome, Delete, Left, Right, SelectLeft, SelectRight, WordLeft, WordRight, SelectWordLeft, SelectWordRight, Home, End, SelectAll, Copy, Cut, Paste, Submit, ShiftSubmit, Cancel, Up, Down, Swallow, Tab, ShiftTab]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -25,6 +26,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, c),
         KeyBinding::new("shift-left", SelectLeft, c),
         KeyBinding::new("shift-right", SelectRight, c),
+        // ⌥← / ⌥→ move by word, ⌥⇧← / ⌥⇧→ select by word, as in any native field.
+        KeyBinding::new("alt-left", WordLeft, c),
+        KeyBinding::new("alt-right", WordRight, c),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, c),
+        KeyBinding::new("alt-shift-right", SelectWordRight, c),
         KeyBinding::new("cmd-left", Home, c),
         KeyBinding::new("cmd-right", End, c),
         KeyBinding::new("home", Home, c),
@@ -87,6 +93,8 @@ pub struct TextField {
     /// Enter and pasted newlines insert line breaks; Up/Down move by line.
     pub multiline: bool,
     pub mono: bool,
+    /// Fonts by run (`TextSpec::font_runs`).
+    pub font_runs: Option<crate::editor::text::FontRuns>,
     /// Longest text in chars (longer input is cut off).
     pub max_len: Option<usize>,
     /// Only ASCII digits get in (number inputs).
@@ -131,6 +139,7 @@ impl TextField {
             wrap: false,
             multiline: false,
             mono: false,
+            font_runs: None,
             max_len: None,
             digits: false,
             tab_events: false,
@@ -158,6 +167,20 @@ impl TextField {
         self.reversed = false;
         cx.notify();
     }
+
+    /// Selects `r` (byte offsets, clamped; a caret when empty).
+    pub fn select_range(&mut self, r: Range<usize>, cx: &mut Context<Self>) {
+        let (a, b) = (r.start.min(self.text.len()), r.end.min(self.text.len()));
+        self.sel = a.min(b)..a.max(b);
+        self.reversed = false;
+        cx.notify();
+    }
+
+    /// The caret (the selection's moving end).
+    pub fn caret(&self) -> usize { self.cursor() }
+
+    /// The selection (byte offsets; empty: the caret).
+    pub fn selection(&self) -> Range<usize> { self.sel.clone() }
 
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
@@ -266,6 +289,26 @@ impl TextField {
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         let n = self.next(self.cursor());
+        self.select_to(n, cx);
+    }
+
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let o = if self.sel.is_empty() { prev_word(&self.text, self.cursor()) } else { self.sel.start };
+        self.move_to(o, cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let o = if self.sel.is_empty() { next_word(&self.text, self.cursor()) } else { self.sel.end };
+        self.move_to(o, cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let p = prev_word(&self.text, self.cursor());
+        self.select_to(p, cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let n = next_word(&self.text, self.cursor());
         self.select_to(n, cx);
     }
 
@@ -380,10 +423,13 @@ impl TextField {
     }
 
     fn on_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         let i = self.index_for(ev.position);
-        if ev.click_count >= 2 {
-            self.select_all_text(cx);
+        // double click: the word under the pointer (as in any text field); triple: everything
+        if ev.click_count >= 3 { self.select_all_text(cx); return; }
+        if ev.click_count == 2 {
+            let w = self.text.split_word_bound_indices().map(|(s, w)| s..s + w.len()).find(|r| r.contains(&i) || r.end == i && i == self.text.len());
+            match w { Some(r) => self.select_range(r, cx), None => self.select_all_text(cx) }
             return;
         }
         self.selecting = true;
@@ -512,6 +558,7 @@ impl Render for TextField {
         spec.color = self.color;
         spec.wrap = self.wrap;
         spec.mono = self.mono;
+        spec.font_runs = self.font_runs.clone();
         let el = RichTextElement {
             id: self.id,
             text: RichText::plain(self.text.clone()),
@@ -522,6 +569,8 @@ impl Render for TextField {
             placeholder_dx: 0.,
             selection: (focused && !self.sel.is_empty()).then(|| self.sel.clone()),
             caret: Some(self.cursor()),
+            caret_row_end: false,
+            fit_content: false,
             marked: self.marked.clone(),
             cache: self.cache.clone(),
             show_caret: focused && !self.hide_caret && self.sel.is_empty(),
@@ -550,6 +599,10 @@ impl Render for TextField {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_all))
@@ -576,7 +629,7 @@ impl Render for TextField {
                     move |bounds, _, window, cx| {
                         window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
                         if pointer_hidden {
-                            window.set_window_cursor_style(CursorStyle::None);
+                            cx.hide_cursor_until_mouse_moves();
                             let e = entity.clone();
                             window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
                                 if phase == DispatchPhase::Bubble {

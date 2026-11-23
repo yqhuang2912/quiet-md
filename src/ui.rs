@@ -20,7 +20,7 @@ pub enum ToastKind {
 /// Toast: a white rounded card 32px below the top, centred, with a filled
 /// status circle (green check / red x / accent i). It lasts 3s and fades over
 /// its last .3s; None once it is over.
-pub fn toast_el(kind: ToastKind, msg: &SharedString, t0: std::time::Instant, window: &mut Window) -> Option<AnyElement> {
+pub fn toast_el(kind: ToastKind, msg: &SharedString, t0: web_time::Instant, window: &mut Window) -> Option<AnyElement> {
     let e = t0.elapsed().as_secs_f32();
     if e >= 3. {
         return None;
@@ -47,7 +47,7 @@ pub fn toast_el(kind: ToastKind, msg: &SharedString, t0: std::time::Instant, win
         .border_1()
         .border_color(Theme::line_border())
         .shadow(theme::shadow_panel())
-        .font_family(theme::UI_FONT)
+        .font_family(theme::ui_family())
         .text_size(px(13.))
         .line_height(px(20.))
         .text_color(Theme::text())
@@ -86,7 +86,7 @@ pub fn popover() -> Div {
         .border_color(Theme::line_border())
         .rounded(px(MENU_RADIUS))
         .shadow(theme::shadow_menu())
-        .font_family(theme::UI_FONT)
+        .font_family(theme::ui_family())
         .text_color(Theme::text())
 }
 
@@ -127,7 +127,18 @@ pub fn scrim() -> Hsla {
 
 /// The modal dialog: white, radius 16, deep soft drop.
 pub fn dialog(id: &'static str) -> Stateful<Div> {
-    div().id(id).occlude().rounded(px(16.)).bg(crate::theme::raised(Theme::bg_body())).shadow(theme::shadow_dialog()).font_family(theme::UI_FONT).text_color(Theme::text())
+    div().id(id).occlude().rounded(px(16.)).bg(crate::theme::raised(Theme::bg_body())).shadow(theme::shadow_dialog()).font_family(theme::ui_family()).text_color(Theme::text())
+}
+
+/// A busy mark for a button: three short bars rising and falling in turn,
+/// for `t` seconds since it started. The caller asks for frames while it shows.
+pub fn spinner(t: f32, color: Hsla) -> Div {
+    let mut bars = div().h(px(14.)).flex().items_center().gap(px(3.));
+    for i in 0..3 {
+        let w = 0.5 + 0.5 * (std::f32::consts::TAU * (t * 1.25 - i as f32 * 0.18)).sin();
+        bars = bars.child(div().w(px(3.)).h(px(5. + 9. * w)).rounded(px(1.5)).bg(color.opacity(0.55 + 0.45 * w)));
+    }
+    bars
 }
 
 /// The primary button: the accent, a white 13pt semibold label, 30 tall, radius 9.
@@ -273,7 +284,7 @@ impl Render for Tooltip {
             .text_color(gpui::white())
             .text_size(px(12.))
             .line_height(px(TIP_LINE))
-            .font_family(theme::UI_FONT)
+            .font_family(theme::ui_family())
             .whitespace_nowrap()
             .flex()
             .flex_col()
@@ -284,7 +295,7 @@ impl Render for Tooltip {
         // 10px from the trigger with an arrow pointing at it, on the preferred
         // side unless it doesn't fit, and kept inside the window.
         let mut style = window.text_style();
-        style.font_family = theme::UI_FONT.into();
+        style.font_family = theme::ui_family().into();
         let text_w = lines
             .iter()
             .map(|l| {
@@ -479,7 +490,7 @@ pub fn format_time(secs: u64) -> String {
     } else if y == ny {
         crate::localized_format!("{mo}月{d}日", "{mo:02}-{d:02}")
     } else {
-        if crate::settings::english() { format!("{y}-{mo:02}-{d:02}") } else { format!("{y}年{mo}月{d}日") }
+        crate::localized_format!("{y}年{mo}月{d}日", "{y}-{mo:02}-{d:02}")
     }
 }
 
@@ -498,7 +509,7 @@ pub fn format_ago(secs: u64) -> String {
 /// Full date ("2025年12月2日"), as in 文档信息.
 pub fn format_date(secs: u64) -> String {
     let (y, mo, d, _, _) = civil(secs);
-    if crate::settings::english() { format!("{y}-{mo:02}-{d:02}") } else { format!("{y}年{mo}月{d}日") }
+    crate::localized_format!("{y}年{mo}月{d}日", "{y}-{mo:02}-{d:02}")
 }
 
 /// Relative time for 文档信息 ("几秒前", "3 分钟前", "2 小时前", then the date).
@@ -507,7 +518,7 @@ pub fn format_relative(secs: u64) -> String {
     match ago {
         0..60 => crate::settings::text("几秒前").into(),
         60..3600 => crate::localized_format!("{} 分钟前", "{} min ago", ago / 60),
-        3600..86_400 => crate::localized_format!("{} 小时前", "{} hours ago", ago / 3600),
+        3600..86_400 => crate::localized_count!(ago / 3600, "{} 小时前", "{} hour ago", "{} hours ago", ago / 3600),
         _ => format_date(secs),
     }
 }
@@ -521,20 +532,20 @@ pub fn format_visit(secs: u64) -> String {
         return crate::settings::tr("刚刚", "just now").into();
     }
     if ago < 3600 {
-        return if crate::settings::english() { format!("{} min ago", ago / 60) } else { format!("{} 分钟前", ago / 60) };
+        return crate::localized_format!("{} 分钟前", "{} min ago", ago / 60);
     }
     let (y, mo, d, h, mi) = civil(secs);
     let day = |back: u64| {
         let (y, mo, d, _, _) = civil(now.saturating_sub(back * 86_400));
         (y, mo, d)
     };
-    let names = if crate::settings::english() { ["Today", "Yesterday", "Two days ago"] } else { ["今天", "昨天", "前天"] };
+    let names = [crate::settings::tr("今天", "Today"), crate::settings::tr("昨天", "Yesterday"), crate::settings::tr("前天", "Two days ago")];
     if let Some(name) = (0..3).find(|&b| day(b) == (y, mo, d)).map(|b| names[b as usize]) {
         format!("{name} {h:02}:{mi:02}")
     } else if y == civil(now).0 {
-        if crate::settings::english() { format!("{mo:02}-{d:02} {h:02}:{mi:02}") } else { format!("{mo}月{d}日 {h:02}:{mi:02}") }
+        crate::localized_format!("{mo}月{d}日 {h:02}:{mi:02}", "{mo:02}-{d:02} {h:02}:{mi:02}")
     } else {
-        if crate::settings::english() { format!("{y}-{mo:02}-{d:02}") } else { format!("{y}年{mo}月{d}日") }
+        crate::localized_format!("{y}年{mo}月{d}日", "{y}-{mo:02}-{d:02}")
     }
 }
 
@@ -601,7 +612,7 @@ pub fn ui_runs(text: &str, style: &TextStyle, hits: &[std::ops::Range<usize>], h
     cuts.windows(2)
         .map(|w| {
             let mut run = style.to_run(w[1] - w[0]);
-            if text[w[0]..w[1]].chars().all(is_cjk_punct) {
+            if text[w[0]..w[1]].chars().all(is_cjk_punct) && !crate::fonts::own_glyphs(&run.font.family).cjk_punct {
                 run.font.family = CJK_PUNCT_FONT.into();
             }
             if hits.iter().any(|r| r.start <= w[0] && w[1] <= r.end) {
@@ -618,7 +629,7 @@ fn truncated(line: &ShapedLine, runs: &[TextRun], suffix: &str, font_size: Pixel
     let mut suffix_runs: Vec<TextRun> = runs.last().cloned().into_iter().collect();
     if let Some(r) = suffix_runs.first_mut() {
         r.len = suffix.len();
-        r.font.family = theme::UI_FONT.into();
+        r.font.family = theme::ui_family().into();
     }
     let suffix_w = window.text_system().shape_line(suffix.to_string().into(), font_size, &suffix_runs, None).width;
     let mut cut = 0;
@@ -645,13 +656,6 @@ fn truncated(line: &ShapedLine, runs: &[TextRun], suffix: &str, font_size: Pixel
     window.text_system().shape_line(s, font_size, &out, None)
 }
 
-impl IntoElement for UiText {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for UiText {
     type RequestLayoutState = UiTextLayout;
     type PrepaintState = Option<ShapedLine>;
@@ -675,7 +679,7 @@ impl Element for UiText {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = style.line_height.to_pixels(font_size.into(), window.rem_size());
         let runs = if self.text.is_empty() { vec![] } else { self.runs(&style) };
-        let ellipsis = style.text_overflow.as_ref().map(|TextOverflow::Truncate(s)| s.clone());
+        let ellipsis = style.text_overflow.as_ref().map(|(TextOverflow::Truncate(s) | TextOverflow::TruncateStart(s) | TextOverflow::TruncateMiddle(s))| s.clone());
         let full = Rc::new(RefCell::new(None));
         let (text, r, f, clip) = (self.text.clone(), runs.clone(), full.clone(), ellipsis.is_some());
         let id = window.request_measured_layout(Style::default(), move |known, avail, window, _| {
@@ -725,7 +729,7 @@ impl Element for UiText {
         cx: &mut App,
     ) {
         if let Some(line) = line {
-            let _ = line.paint(bounds.origin, layout.line_height, window, cx);
+            let _ = line.paint(bounds.origin, layout.line_height, TextAlign::Left, None, window, cx);
         }
     }
 }
@@ -739,13 +743,6 @@ pub fn ui_para(text: impl Into<SharedString>) -> UiPara {
 pub struct UiPara {
     text: SharedString,
     inner: Option<StyledText>,
-}
-
-impl IntoElement for UiPara {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
 }
 
 impl Element for UiPara {
@@ -802,36 +799,54 @@ impl Element for UiPara {
     }
 }
 
-/// Paint the outside of a continuous corner, including over cover images.
-pub fn continuous_corner_mask(radius: f32, color: Hsla) -> impl IntoElement {
-    canvas(|bounds, _, _| bounds, move |_, b, window, _| {
-        let x = f32::from(b.left()); let y = f32::from(b.top());
-        let w = f32::from(b.size.width); let h = f32::from(b.size.height);
-        let r = radius.min(w / 2.).min(h / 2.);
-        for (sx, sy, ux, uy, vx, vy) in [
-            (x + w - r, y, 1., 0., 0., 1.),
-            (x + w, y + h - r, 0., 1., -1., 0.),
-            (x + r, y + h, -1., 0., 0., -1.),
-            (x, y + r, 0., -1., 1., 0.),
-        ] {
-            let q = |u: f32, v: f32| point(px(sx + r * (u * ux + v * vx)), px(sy + r * (u * uy + v * vy)));
-            let mut path = PathBuilder::fill();
-            path.move_to(q(0., 0.));
-            path.line_to(q(1., 0.));
-            path.line_to(q(1., 1.));
-            path.cubic_bezier_to(q(std::f32::consts::FRAC_1_SQRT_2, 0.2928932), q(1., 0.7928932), q(1., 0.5857864));
-            path.cubic_bezier_to(q(0., 0.), q(0.4142136, 0.), q(0.2071068, 0.));
-            path.close();
-            if let Ok(path) = path.build() { window.paint_path(path, color); }
+/// CSS `corner-shape: squircle` (superellipse |x|⁴ + |y|⁴ = 1 in each `r`
+/// box): the outline of `b` inset by `i`, clockwise from the top edge.
+fn squircle_points(b: Bounds<Pixels>, radius: f32, i: f32) -> Vec<Point<Pixels>> {
+    let (x, y) = (f32::from(b.left()) + i, f32::from(b.top()) + i);
+    let (w, h) = (f32::from(b.size.width) - 2. * i, f32::from(b.size.height) - 2. * i);
+    let r = (radius - i).max(0.).min(w / 2.).min(h / 2.);
+    const N: usize = 24;
+    let mut out = Vec::with_capacity(4 * (N + 1));
+    // Anchor centres with the directions to the corner's start and end edges.
+    for (cx, cy, ax, ay, bx, by) in [(x + w - r, y + r, 0., -1., 1., 0.), (x + w - r, y + h - r, 1., 0., 0., 1.), (x + r, y + h - r, 0., 1., -1., 0.), (x + r, y + r, -1., 0., 0., -1.)] {
+        for k in 0..=N {
+            let t = std::f32::consts::FRAC_PI_2 * k as f32 / N as f32;
+            let (u, v) = (t.cos().max(0.).sqrt() * r, t.sin().max(0.).sqrt() * r);
+            out.push(point(px(cx + u * ax + v * bx), px(cy + u * ay + v * by)));
         }
+    }
+    out
+}
+
+pub(crate) fn squircle_path(b: Bounds<Pixels>, radius: f32, i: f32, mut pb: PathBuilder) -> Option<Path> {
+    // lyon panics on a collapsed outline (a box not laid out yet).
+    if f32::from(b.size.width) <= 2. * i + 1. || f32::from(b.size.height) <= 2. * i + 1. || radius <= i { return None }
+    let pts = squircle_points(b, radius, i);
+    pb.move_to(pts[0]);
+    for p in &pts[1..] { pb.line_to(*p); }
+    pb.close();
+    pb.build().ok()
+}
+
+/// A squircle-cornered fill (see `squircle_points`).
+pub fn squircle_surface(radius: f32, color: Hsla) -> Div {
+    div().relative().child(canvas(|b, _, _| b, move |_, b, window, _| {
+        if let Some(p) = squircle_path(b, radius, 0., PathBuilder::fill()) { window.paint_path(p, color); }
+    }).absolute().inset_0())
+}
+
+/// A `width` line along the inside of the squircle edge.
+pub fn squircle_outline(radius: f32, width: f32, color: Hsla) -> impl IntoElement {
+    canvas(|b, _, _| b, move |_, b, window, _| {
+        if let Some(p) = squircle_path(b, radius, width / 2., PathBuilder::stroke(px(width))) { window.paint_path(p, color); }
     }).absolute().inset_0()
 }
 
 /// A capsule filled to `fraction` from the left, its edge a moving wave (the
 /// update pill's download progress). Redraws every frame while shown.
 pub fn wave_fill(fraction: f32, color: Hsla) -> impl IntoElement {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let t = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f32();
+    static START: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+    let t = START.get_or_init(web_time::Instant::now).elapsed().as_secs_f32();
     canvas(|bounds, _, _| bounds, move |_, b, window, _| {
         window.request_animation_frame();
         let f = fraction.clamp(0., 1.);
@@ -853,8 +868,6 @@ pub fn wave_fill(fraction: f32, color: Hsla) -> impl IntoElement {
         if let Ok(path) = path.build() { window.paint_path(path, color); }
     }).absolute().inset_0()
 }
-
-pub fn continuous_page(radius: f32) -> Div { continuous_surface(radius, Theme::bg_body()) }
 
 pub fn continuous_surface(radius: f32, color: Hsla) -> Div {
     div().relative().child(canvas(|bounds, _, _| bounds, move |_, bounds, window, _| {

@@ -89,6 +89,30 @@ pub fn normalize(s: &str) -> String {
     }
 }
 
+/// Opens a link in the browser picked in 设置 › 通用 (the system default when
+/// none is picked). `open -a` takes the app's name; if it fails, the system
+/// default still gets the link, so a browser that was uninstalled can't make
+/// clicking a link do nothing.
+pub(crate) fn open(cx: &mut App, url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let app = crate::settings::prefs().browser;
+        if !app.is_empty()
+            && std::process::Command::new("open")
+                .arg("-a")
+                .arg(&app)
+                .arg(url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        {
+            return;
+        }
+    }
+    cx.open_url(url);
+}
+
 /// The link around `offset` (adjacent runs with the same URL merge).
 pub fn link_at(t: &RichText, offset: usize) -> Option<(Range<usize>, String)> {
     let mut cur: Option<(Range<usize>, String)> = None;
@@ -173,7 +197,7 @@ impl Editor {
             &self.link_field
         };
         let fh = field.read(cx).focus_handle(cx);
-        window.focus(&fh);
+        window.focus(&fh, cx);
         cx.notify();
     }
 
@@ -240,7 +264,7 @@ impl Editor {
         if matches!(self.menu, Some(Menu::Link { .. })) {
             self.menu = None;
         }
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.restart_blink(window, cx);
         cx.notify();
     }
@@ -314,7 +338,7 @@ impl Editor {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(rows)
             .child(button);
-        Some(at(self.rel(point(x, bottom)), Corner::TopLeft, el))
+        Some(at(self.rel(point(x, bottom)), Anchor::TopLeft, el))
     }
 
     // ---- hover card
@@ -449,7 +473,7 @@ impl Editor {
         let view_top = self.list.viewport_bounds().top();
         let x = union.center().x - px(CARD_W / 2.);
         let above = first.top() - px(7. + CARD_H) >= view_top;
-        let (pos, corner) = if above { (point(x, first.top() - px(7.)), Corner::BottomLeft) } else { (point(x, union.bottom() + px(7.)), Corner::TopLeft) };
+        let (pos, corner) = if above { (point(x, first.top() - px(7.)), Anchor::BottomLeft) } else { (point(x, union.bottom() + px(7.)), Anchor::TopLeft) };
         let btn = |id: &'static str| {
             div()
                 .id(id)
@@ -475,7 +499,7 @@ impl Editor {
                 .absolute()
                 .left(px(CARD_MORE_X - 9. - 1.))
                 .top(px(1. + 8. + 24. + 2. - 1.))
-                .w(px(SUBMENU_W))
+                .min_w(px(SUBMENU_W))
                 .py(px(crate::editor_ui::MENU_PAD_Y))
                 .on_hover(cx.listener(|e, h: &bool, _, cx| e.card_over(2, *h, cx)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -549,7 +573,9 @@ impl Editor {
         if let Some(url) = self.link_ui.click.take()
             && self.core.sel.is_collapsed()
         {
-            cx.open_url(&normalize(&url));
+            if url.starts_with("quiet-wiki:") || crate::paste::relative_link(&url) && !url.starts_with("www.") {
+                cx.emit(super::view::EditorEvent::OpenRelative(url));
+            } else { open(cx, &normalize(&url)); }
         }
     }
 
@@ -574,7 +600,7 @@ impl Editor {
         menu()
             .id("tb-more-menu")
             .occlude()
-            .w(px(SUBMENU_W))
+            .min_w(px(SUBMENU_W))
             .py(px(crate::editor_ui::MENU_PAD_Y))
             .on_hover(cx.listener(|e, h: &bool, _, cx| e.tb_drop_over(Menu::TbMore, 1, *h, cx)))
             .child(menu_item("tm-search", "search", crate::settings::text("文档库内搜索")).on_click(cx.listener(|e, _, _, cx| {
@@ -585,7 +611,7 @@ impl Editor {
             .child(menu_item("tm-web", "globe", crate::settings::text("网页搜索")).on_click(cx.listener(|e, _, _, cx| {
                 e.menu = None;
                 let q = e.core.selected_text();
-                cx.open_url(&format!("https://www.baidu.com/s?wd={}", encode_query(&q)));
+                open(cx, &web_search_url(&q));
                 cx.notify();
             })))
     }
@@ -602,6 +628,17 @@ fn encode_query(s: &str) -> String {
         }
     }
     out
+}
+
+/// 网页搜索: the site is a preference (设置 › 通用), Google by default.
+fn web_search_url(s: &str) -> String {
+    let base = match crate::settings::prefs().search_engine.as_str() {
+        "bing" => "https://www.bing.com/search?q=",
+        "baidu" => "https://www.baidu.com/s?wd=",
+        "duckduckgo" => "https://duckduckgo.com/?q=",
+        _ => "https://www.google.com/search?q=",
+    };
+    format!("{base}{}", encode_query(s))
 }
 
 /// The app's menu row (`ui::menu_row`): 16pt glyph, 13pt label, a quiet hover.

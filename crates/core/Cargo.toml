@@ -2,7 +2,7 @@
 # disk, import and export. No GPUI, so it builds and tests on its own.
 [package]
 name = "fdl_core"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 description = "The document engine behind Quiet.md: model, DocxXML, editing core, library"
 license = "MIT"
@@ -11,17 +11,30 @@ authors = ["s1dashu"]
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.22"
 dirs = "7.0.0"
 quick-xml = "0.37"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+regex = "1.13"
+unicode-normalization = "0.1.26"
 unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
 uuid = { version = "1.28.0", features = ["v4"] }
 rustc-hash = "2.1"
+web-time = { version = "1", features = ["serde"] }
 html5ever = "0.27"
 markup5ever_rcdom = "0.3"
-base64 = "0.22"
-ureq = { version = "2.12", features = ["json"] }
+miniz_oxide = "0.9"
+sha1_smol = "1.0"
+
+# The 数据表 file (`table::sqlite`); bundled, so the three platforms carry the same SQLite.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rusqlite = { version = "0.43", features = ["bundled"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+uuid = { version = "1.28.0", features = ["v4", "js"] }
+js-sys = "0.3"
 
 [lints]
 workspace = true

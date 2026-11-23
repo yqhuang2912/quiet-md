@@ -96,7 +96,7 @@ impl Workspace {
         let _ = self.store.update_meta(&id, |m| m.reading = reading);
         if let Some(ed) = &self.editor {
             ed.update(cx, |e, cx| e.set_read_only(reading, cx));
-            ed.read(cx).focus(window);
+            { let f = ed.read(cx).focus.clone(); window.focus(&f, cx); }
         }
         self.show_toast_kind(ToastKind::Info, if reading { crate::settings::text("已切换为阅读模式") } else { crate::settings::text("已切换为编辑模式") }, cx);
     }

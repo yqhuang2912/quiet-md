@@ -126,7 +126,7 @@ pub(super) fn table_scrollbar(handle: ScrollHandle, sb: std::rc::Rc<Scrollbar>) 
     let list = handle.clone();
     canvas(
         move |bounds, window, _| {
-            let max = list.max_offset().width;
+            let max = list.max_offset().x;
             if max <= px(1.) {
                 return None;
             }
@@ -181,7 +181,7 @@ pub(super) fn table_scrollbar(handle: ScrollHandle, sb: std::rc::Rc<Scrollbar>) 
                         Some((dx, _, w)) if ev.pressed_button == Some(MouseButton::Left) => {
                             let travel = (bounds.size.width - w).max(px(1.));
                             let f = ((ev.position.x - dx - bounds.left()) / travel).clamp(0., 1.);
-                            list.set_offset(point(-list.max_offset().width * f, list.offset().y));
+                            list.set_offset(point(-list.max_offset().x * f, list.offset().y));
                             window.refresh();
                         }
                         Some(_) => {

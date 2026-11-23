@@ -2,6 +2,7 @@
 //! (the first page or frame from Quick Look's thumbnailer, the inline audio
 //! player), its toolbar, and inserting picked or dropped files.
 
+use fdl_core::vfs::{PathExt as _, KindExt as _};
 use super::core::{DropPlace, Pos, Selection, TITLE};
 use super::overlays::{Probe, at};
 use super::render::{Env, R};
@@ -11,7 +12,7 @@ use crate::model::*;
 use crate::store::Store;
 use crate::editor_theme::{self as theme, Theme, craft};
 use crate::editor_ui::{ROW_RADIUS, TipExt, icon, popover};
-use super::image::PictureExt;
+use super::image::picture;
 use gpui::{prelude::FluentBuilder, *};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -128,7 +129,7 @@ pub fn type_icon(k: Kind, s: f32) -> Div {
 /// The same icon painted into `b` (the inline chip).
 pub fn paint_type_icon(k: Kind, b: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
     for (path, color) in [("editor-icons/file-page.svg", theme::c(kind_color(k))), ("editor-icons/file-fold.svg", theme::rgbaf(255, 255, 255, 0.45)), (glyph(k), gpui::white())] {
-        let _ = window.paint_svg(b, path.into(), TransformationMatrix::unit(), color, cx);
+        let _ = window.paint_svg(b, path.into(), None, TransformationMatrix::unit(), color, cx);
     }
 }
 
@@ -196,7 +197,7 @@ impl FileUi {
         if let Some(s) = self.sizes.borrow().get(p) {
             return *s;
         }
-        let s = std::fs::metadata(p).ok().filter(|m| m.is_file()).map(|m| m.len());
+        let s = fdl_core::vfs::metadata(p).ok().filter(|m| m.fs_is_file()).map(|m| m.len());
         self.sizes.borrow_mut().insert(p.to_path_buf(), s);
         s
     }
@@ -240,7 +241,7 @@ impl FileUi {
 fn thumb_dir(p: &Path) -> PathBuf {
     let mut h = rustc_hash::FxHasher::default();
     p.hash(&mut h);
-    if let Ok(m) = std::fs::metadata(p) {
+    if let Ok(m) = fdl_core::vfs::metadata(p) {
         m.len().hash(&mut h);
         m.modified().ok().hash(&mut h);
     }
@@ -248,12 +249,12 @@ fn thumb_dir(p: &Path) -> PathBuf {
 }
 
 fn first_png(dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "png"))
+    fdl_core::vfs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "png"))
 }
 
 fn make_thumb(p: &Path) -> Option<PathBuf> {
     let dir = thumb_dir(p);
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = fdl_core::vfs::create_dir_all(&dir);
     let _ = std::process::Command::new("qlmanage")
         .args(["-t", "-s", "1200", "-o"])
         .arg(&dir)
@@ -267,7 +268,7 @@ fn make_thumb(p: &Path) -> Option<PathBuf> {
 
 /// Opens the file in Quick Look (scripted runs only log it).
 pub fn quick_look(p: &Path) {
-    if crate::devtools::scripted() {
+    if crate::devtools::scripted() || cfg!(target_family = "wasm") {
         eprintln!("quicklook {}", p.display());
         return;
     }
@@ -281,11 +282,11 @@ pub fn quick_look(p: &Path) {
 /// A new attachment for `p`, copied into `assets/files/<uuid>/<name>`.
 fn file_block_from_path(p: &Path) -> Option<Block> {
     let name = p.file_name()?.to_string_lossy().to_string();
-    let size = std::fs::metadata(p).ok().filter(|m| m.is_file())?.len();
+    let size = fdl_core::vfs::metadata(p).ok().filter(|m| m.fs_is_file())?.len();
     let dir = Store::assets_dir().join("files").join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir).ok()?;
+    fdl_core::vfs::create_dir_all(&dir).ok()?;
     let dest = dir.join(&name);
-    std::fs::copy(p, &dest).ok()?;
+    fdl_core::vfs::copy(p, &dest).ok()?;
     let view = match preview_of(&name) {
         Some(Kind::Audio) => FileView::Preview,
         Some(Kind::Video) if size < VIDEO_PREVIEW_MAX => FileView::Preview,
@@ -469,7 +470,7 @@ impl R<'_> {
                         let (tw, th) = ed.img.dims(t).unwrap_or((16., 9.));
                         let full = iw * th / tw.max(1.);
                         let h = full.clamp(if video { 160. } else { 120. }, 600.);
-                        let pic = img(t.clone()).doc_picture().object_fit(if video { ObjectFit::Contain } else { ObjectFit::Fill }).id(("file-thumb", id.0));
+                        let pic = picture(t, iw.max(full)).object_fit(if video { ObjectFit::Contain } else { ObjectFit::Fill }).id(("file-thumb", id.0));
                         let pic = if video { pic.size_full() } else { pic.absolute().top_0().left_0().w(px(iw)).h(px(full)) };
                         div()
                             .relative()
@@ -607,7 +608,7 @@ impl R<'_> {
         div()
             .w_full()
             .flex()
-            .font_family(theme::UI_FONT)
+            .font_family(theme::DOC_UI_FONT)
             .map(|d| match b.align {
                 Align::Left => d.justify_start(),
                 Align::Center => d.justify_center(),
@@ -631,7 +632,7 @@ impl Editor {
     }
 
     pub(super) fn open_file(&mut self, p: Option<&Path>, cx: &mut Context<Self>) {
-        match p.filter(|p| p.is_file()) {
+        match p.filter(|p| p.fs_is_file()) {
             Some(p) => quick_look(p),
             None => self.toast(crate::settings::text("文件不存在"), cx),
         }
@@ -639,7 +640,7 @@ impl Editor {
 
     /// 下载: a copy where the save panel says (Downloads first).
     pub(super) fn download_file(&mut self, f: &FileBlock, cx: &mut Context<Self>) {
-        let Some(src) = local_path(f).filter(|p| p.is_file()) else { return self.toast(crate::settings::text("文件不存在"), cx) };
+        let Some(src) = local_path(f).filter(|p| p.fs_is_file()) else { return self.toast(crate::settings::text("文件不存在"), cx) };
         let picked = crate::devtools::take_pick().and_then(|p| p.into_iter().next());
         let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_default();
         let rx = picked.is_none().then(|| cx.prompt_for_new_path(&dir, Some(&f.name)));
@@ -651,7 +652,7 @@ impl Editor {
             };
             let Some(dest) = dest else { return };
             bg.spawn(async move {
-                let _ = std::fs::copy(&src, &dest);
+                let _ = fdl_core::vfs::copy(&src, &dest);
             })
             .await;
         })
@@ -824,7 +825,7 @@ impl Editor {
                             cx.stop_propagation();
                             window.prevent_default();
                             e.core.set_file_view(id, v);
-                            e.changed(window, cx);
+                            e.changed_preserving_viewport(window, cx);
                         }),
                     ),
             );
@@ -844,7 +845,7 @@ impl Editor {
                 window.prevent_default();
             })
             .child(bar);
-        Some(at(self.rel(point(px(x), px(y))), Corner::TopLeft, el))
+        Some(at(self.rel(point(px(x), px(y))), Anchor::TopLeft, el))
     }
 
     /// The hover card of an inline attachment: 下载 | 文本视图 · 卡片视图 ·
@@ -886,7 +887,7 @@ impl Editor {
                     window.prevent_default();
                     if e.core.inline_to_file(p, v).is_some() {
                         e.hide_button_card(cx);
-                        window.focus(&e.focus);
+                        window.focus(&e.focus, cx);
                         e.changed(window, cx);
                     }
                 }),
@@ -904,7 +905,7 @@ impl Editor {
                 window.prevent_default();
             })
             .child(bar);
-        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Corner::BottomLeft, el))
+        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Anchor::BottomLeft, el))
     }
 
     // ---- inserting
@@ -956,7 +957,7 @@ impl Editor {
                         e.core.sel = Selection::caret(Pos::new(p, 0));
                     }
                 }
-                window.focus(&e.focus);
+                window.focus(&e.focus, cx);
                 e.changed(window, cx);
             });
         })

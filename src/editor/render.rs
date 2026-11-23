@@ -110,6 +110,8 @@ fn hash_block(b: &Block, orders: &rustc_hash::FxHashMap<BlockId, String>, h: &mu
         }
         BlockKind::Column { ratio } => ratio.to_bits().hash(h),
         BlockKind::File(f) => (&f.src, &f.name, f.view).hash(h),
+        BlockKind::Board(bd) => bd.height.to_bits().hash(h),
+        BlockKind::DataTable(t) => (&t.src, t.height.to_bits()).hash(h),
         BlockKind::Table(t) => {
             t.col_widths.iter().for_each(|w| w.to_bits().hash(h));
             (t.header_rows, t.header_col).hash(h);
@@ -251,6 +253,7 @@ impl R<'_> {
             placeholder_dx: 0.,
             selection,
             caret: caret_here.then_some(sel.head.offset),
+            caret_row_end: caret_here && self.ed.caret_row_end == Some((id, sel.head.offset)),
             marked: self.ed.marked.as_ref().filter(|(b, _)| *b == id && !self.ghost).map(|(_, r)| r.clone()),
             cache: self.cache.clone(),
             show_caret: caret_here && self.focused && self.ed.caret_visible && !self.ed.read_only,
@@ -259,7 +262,24 @@ impl R<'_> {
             eq_counter: self.eqnos.get(&id).copied().unwrap_or(0),
             button_edit: if self.ghost { None } else { self.ed.button_preview(id) },
             scroll: None,
+            fit_content: false,
         }
+    }
+
+    /// The code column. Unwrapped code scrolls sideways in it, with the wide
+    /// table's thin scrollbar in the padding `below` the last line (#161).
+    fn code_column(&self, id: BlockId, wrap: bool, el: RichTextElement, below: f32) -> AnyElement {
+        if wrap {
+            return div().flex_1().min_w_0().overflow_hidden().child(el).into_any_element();
+        }
+        let (scroll, bar) = self.ed.code_hscroll.borrow_mut().entry(id).or_insert_with(|| (ScrollHandle::new(), Default::default())).clone();
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .child(div().id(("code-scroll", id.0)).w_full().flex().overflow_x_scroll().track_scroll(&scroll).child(RichTextElement { fit_content: true, ..el }))
+            .child(super::scrollbar::table_scrollbar(scroll, bar).absolute().left_0().right_0().bottom(px(-below)).h(px(12.)))
+            .into_any_element()
     }
 
     fn caret_in_empty(&self, b: &Block) -> bool {
@@ -309,7 +329,14 @@ impl R<'_> {
     pub fn blocks(&self, list: &[Block], env: Env, cx: &mut Context<Editor>) -> Div {
         let mut col = div().flex().flex_col().w_full();
         for (i, gap) in visible_with_gaps(list, env) {
-            col = col.child(div().mt(px(gap)).child(self.block(&list[i], list, i, Env { root: false, ..env }, cx)));
+            // Nested rows are drawn here rather than by `render_item`, so the
+            // 版本历史 tint has to be applied on this wrapper.
+            col = col.child(
+                div()
+                    .mt(px(gap))
+                    .when_some(self.ed.mark_fill(list[i].id), |d, fill| d.rounded(px(3.)).bg(fill))
+                    .child(self.block(&list[i], list, i, Env { root: false, ..env }, cx)),
+            );
         }
         col
     }
@@ -431,6 +458,8 @@ impl R<'_> {
             BlockKind::Image { .. } => self.image(b, env, cx),
             BlockKind::SubPageList => self.sub_page_list(b, cx),
             BlockKind::Countdown(c) => self.countdown(b, c, cx),
+            BlockKind::Board(bd) => self.board_block(b, bd, cx),
+            BlockKind::DataTable(t) => self.datatable_block(b, t, cx),
             BlockKind::File(f) => self.file(b, f, env, cx),
             BlockKind::Table(t) if self.ghost => self.ghost_table(b, t, cx),
             BlockKind::Table(t) => self.table(b, t, env.root, cx),
@@ -560,11 +589,17 @@ impl R<'_> {
                     MouseButton::Left,
                     cx.listener(move |e, _, window, cx| {
                         cx.stop_propagation();
+                        let selection = (e.core.sel, e.core.block_sel);
                         e.core.toggle_fold(id);
                         e.core.fix_selection();
                         e.keep_read_only_fold();
-                        e.fold_anim = Some((id, std::time::Instant::now()));
-                        e.changed(window, cx);
+                        e.fold_anim = Some((id, web_time::Instant::now()));
+                        if selection == (e.core.sel, e.core.block_sel) {
+                            e.changed_preserving_viewport(window, cx);
+                        } else {
+                            // A caret hidden by the fold was moved to its heading.
+                            e.changed(window, cx);
+                        }
                     }),
                 )
                 .into_any_element(),
@@ -609,7 +644,7 @@ impl R<'_> {
                         .flex()
                         .items_center()
                         .whitespace_nowrap()
-                        .font_family(theme::UI_FONT)
+                        .font_family(theme::DOC_UI_FONT)
                         .font_weight(weight)
                         .text_size(px(size))
                         .text_color(Theme::text_caption())
@@ -638,6 +673,9 @@ impl R<'_> {
         let spec = self.spec_for(b, env);
         let lh = spec.line_height;
         let id = b.id;
+        // An item that reads right to left (see `text::row_starts`) keeps its
+        // marker on the right, beside the text.
+        let rtl = b.align == crate::model::Align::Left && super::bidi::rtl_line(b.text.text.split('\n').next().unwrap_or(""));
         let marker: AnyElement = match b.kind {
             // Drawn rather than typeset so the dot size (5.5) and its centring
             // on the line don't depend on how the font's bullet glyph renders.
@@ -650,7 +688,7 @@ impl R<'_> {
                     1 => dot.rounded_full().border_1().border_color(c),
                     _ => dot.size(px(4.5)).rounded(px(1.)).bg(c),
                 };
-                div().w(px(18.)).pl(px(5.)).mr(px(6.)).flex().child(dot).into_any_element()
+                div().w(px(18.)).when(!rtl, |d| d.pl(px(5.)).mr(px(6.))).when(rtl, |d| d.pr(px(5.)).ml(px(6.)).justify_end()).flex().child(dot).into_any_element()
             }
             BlockKind::Ordered { .. } => div()
                 .id(("ordered-number", id.0))
@@ -663,9 +701,10 @@ impl R<'_> {
                 }))
                 .min_w(px(18.))
                 .px(px(1.))
-                .mr(px(6.))
+                .when(!rtl, |d| d.mr(px(6.)))
+                .when(rtl, |d| d.ml(px(6.)))
                 .whitespace_nowrap()
-                .font_family(theme::UI_FONT)
+                .font_family(theme::DOC_UI_FONT)
                 .text_size(px(spec.size))
                 .text_color(theme::style().color("number.color").unwrap_or_else(Theme::text))
                 .child(core::ordered_marker(core::ordered_number(siblings, idx), env.depth))
@@ -680,7 +719,8 @@ impl R<'_> {
                 div()
                     .id(("todo", id.0))
                     .size(px(box_size))
-                    .mr(px(8.))
+                    .when(!rtl, |d| d.mr(px(8.)))
+                    .when(rtl, |d| d.ml(px(8.)))
                     .rounded(px(st.num("task.radius")))
                     .border_1()
                     .when(!done, |d| d.border_color(Theme::todo_box()).bg(crate::theme::raised(Theme::bg_body())).hover(|s| s.border_color(Theme::primary())))
@@ -694,9 +734,9 @@ impl R<'_> {
                         MouseButton::Left,
                         cx.listener(move |e, _, window, cx| {
                             cx.stop_propagation();
-                            window.focus(&e.focus);
+                            window.focus(&e.focus, cx);
                             e.core.toggle_todo(id);
-                            e.changed(window, cx);
+                            e.changed_preserving_viewport(window, cx);
                         }),
                     )
                     .into_any_element()
@@ -712,6 +752,7 @@ impl R<'_> {
                 div()
                     .id(("row", id.0))
                     .flex()
+                    .when(rtl, |d| d.flex_row_reverse())
                     .when(todo, |d| {
                         d.mx(px(-3.))
                             .px(px(3.))
@@ -757,6 +798,7 @@ impl R<'_> {
             doc_font: true,
             font: None,
             italic: false,
+            font_runs: None,
         };
         // Line numbers follow the wrapped rows of the last layout.
         let rows_per_line: Vec<usize> = {
@@ -778,7 +820,7 @@ impl R<'_> {
         // Header: fold triangle, caption at x 29, then the toolbar (22 tall,
         // right-aligned), revealed on hover / while editing.
         let editing = self.focused && self.ed.core.sel.head.block == id;
-        let folded = self.ed.code_folded.contains(&id);
+        let folded = b.folded;
         // Handle hovered / its menu open (`.hovered`): light blue ring
         // over a clear body so the block tint shows; block-selected: blue
         // border on the gray body.
@@ -879,16 +921,13 @@ impl R<'_> {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |e, _, _, cx| {
+                cx.listener(move |e, _, window, cx| {
                     cx.stop_propagation();
-                    if !e.code_folded.remove(&id) {
-                        e.code_folded.insert(id);
-                        // Leave the hidden code (it opens again if the caret comes back).
-                        if e.core.sel.head.block == id || e.core.sel.anchor.block == id {
-                            e.core.select_block(id);
-                        }
-                    }
-                    cx.notify();
+                    // Saved with the document; a caret in the hidden code leaves for the
+                    // block (it opens again if the caret comes back).
+                    e.core.set_code_folded(id, !folded);
+                    e.keep_read_only_fold();
+                    e.changed_preserving_viewport(window, cx);
                 }),
             );
         let border = if menu_on {
@@ -937,7 +976,7 @@ impl R<'_> {
                     .pr(px(6.))
                     .flex()
                     .items_center()
-                    .font_family(theme::UI_FONT)
+                    .font_family(theme::DOC_UI_FONT)
                     .children(caption)
                     .child(
                         div()
@@ -963,7 +1002,7 @@ impl R<'_> {
                                                 {
                                                     *wrap = !*wrap;
                                                 }
-                                                e.changed(window, cx);
+                                                e.changed_preserving_viewport(window, cx);
                                             }),
                                         ),
                                 )
@@ -1013,7 +1052,7 @@ impl R<'_> {
                                         .map(|(i, n)| div().h(px(code_line * *n as f32)).child(format!("{}", i + 1))),
                                 ),
                         ))
-                        .child(div().flex_1().min_w_0().overflow_hidden().child(el)),
+                        .child(self.code_column(id, wrap, el, 12.)),
                 )
             })
             .into_any_element()
@@ -1044,8 +1083,6 @@ impl Editor {
         let links = self.links_key();
         // Rows whose look depends on editor state, not the document.
         let mut nonces = self.grid_overrides();
-        // A folded code block is a 40px row.
-        nonces.extend(self.code_folded.iter().map(|&id| (id, id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1)));
         nonces.extend(self.image_nonces(focused).into_iter().chain(self.button_nonce()));
         // Walking a long document costs ~1.5ms (1M chars): skip it when
         // nothing the rows depend on changed, as on every scrolling frame.
@@ -1104,6 +1141,14 @@ impl Editor {
                 });
             }
         }
+        // 阅读位置: the document reopens where it was left. Applied here, after
+        // the rows are known, because the item count is what `scroll_to` clamps
+        // against.
+        if let Some((ix, y)) = self.restore_top.take()
+            && ix < keys.len()
+        {
+            self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(y) });
+        }
         self.items = items;
         self.item_keys = keys;
     }
@@ -1151,7 +1196,7 @@ impl Editor {
                 spec.line_height = theme::title().line_height;
                 spec.weight = FontWeight(theme::style().num("title.weight"));
                 if let Some(c) = theme::style().color("title.color") { spec.color = c; }
-                let tf = theme::style().font("title.font");
+                let tf = theme::title_font();
                 if tf != theme::body_font() { spec.font = Some(tf); }
                 cover = self.cover_el(window, cx);
                 div()
@@ -1192,6 +1237,8 @@ impl Editor {
                 }
                 let Some(b) = list.get(bi) else { return div().into_any_element() };
                 let depth = outer.len();
+                // 版本历史 显示改动: this block is new or was rewritten here.
+                if let Some(fill) = self.mark_fill(b.id) { bgs.push((depth, fill)) }
                 r.flat = flattens(b).then_some(b.id);
                 let ends = |d: usize| !matches!(self.items.get(ix + 1), Some(Item::Block { path: next, .. }) if next.starts_with(&path[..=d]));
                 let last = sel_depth.is_some_and(ends);
@@ -1250,7 +1297,14 @@ impl Editor {
         let Some((req, tries)) = self.reveal.take() else { return };
         let view = self.list.viewport_bounds();
         let caret_rect = |p: Pos| {
-            self.cache.borrow().get(&p.block).map(|l| Bounds::new(l.position_for(p.offset), size(px(2.), l.line_height)))
+            self.cache.borrow().get(&p.block).map(|l| {
+                let at = if self.caret_row_end == Some((p.block, p.offset)) {
+                    l.position_at_row_end(p.offset)
+                } else {
+                    l.position_for(p.offset)
+                };
+                Bounds::new(at, size(px(2.), l.line_height))
+            })
         };
         let (block, target) = match req {
             Reveal::Caret => match self.core.block_sel {
@@ -1291,6 +1345,19 @@ impl Editor {
             self.list.scroll_by(d);
             window.request_animation_frame();
         }
+        // Unwrapped code scrolls sideways to keep the caret (or find hit) in view.
+        if !matches!(req, Reveal::Block(_))
+            && let Some((scroll, _)) = self.code_hscroll.borrow().get(&block)
+        {
+            let (b, off, max) = (scroll.bounds(), scroll.offset(), scroll.max_offset().x);
+            let pad = px(16.);
+            let dx = if t.left() < b.left() + pad { b.left() + pad - t.left() } else if t.right() > b.right() - pad { b.right() - pad - t.right() } else { px(0.) };
+            let x = (off.x + dx).clamp(-max, px(0.));
+            if dx != px(0.) && x != off.x {
+                scroll.set_offset(point(x, off.y));
+                window.request_animation_frame();
+            }
+        }
     }
 
     fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1300,6 +1367,8 @@ impl Editor {
         // before the caches are reset for this frame.
         let overlays = self.render_overlays(window, cx);
         let lightbox = self.lightbox_el(window, cx);
+        let board = self.board_el();
+        self.sync_tables(window, cx);
         let toast = self.toast_el(window);
         let probes = std::mem::take(&mut *self.probes.borrow_mut());
         let origin0 = self.content_origin.get();
@@ -1322,6 +1391,7 @@ impl Editor {
         // Reads last frame's bar segments.
         self.table_autoscroll(window);
         self.block_autoscroll(window);
+        self.text_autoscroll(window, cx);
         self.tick_drop_flash(window);
         if let Some((_, t0)) = self.fold_anim {
             if t0.elapsed().as_secs_f32() >= 0.2 {
@@ -1399,7 +1469,7 @@ impl Editor {
                     }
                 }
                 if pointer_hidden {
-                    window.set_window_cursor_style(CursorStyle::None);
+                    cx.hide_cursor_until_mouse_moves();
                     let e = entity.clone();
                     window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
                         if phase == DispatchPhase::Bubble {
@@ -1547,7 +1617,7 @@ impl Editor {
             .size_full()
             .relative()
             // No fill of its own: the note panel behind it is white and rounded.
-            .font_family(theme::UI_FONT)
+            .font_family(theme::ui_family())
             .text_color(Theme::text())
             .on_mouse_move(cx.listener(Self::on_hover_move))
             .on_mouse_up(
@@ -1568,6 +1638,9 @@ impl Editor {
                 div()
                     .id("editor-page")
                     .size_full()
+                    // The note's own labels (list numbers, captions) keep the
+                    // platform face; the menus over it follow 界面字体.
+                    .font_family(theme::DOC_UI_FONT)
                     .cursor(CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_drag_move(cx.listener(Self::file_drag_move))
@@ -1585,6 +1658,7 @@ impl Editor {
             .children(counter)
             .children(find_box)
             .children(lightbox)
+            .children(board)
             .children(toast)
             .child(root_canvas)
     }
@@ -1597,14 +1671,29 @@ fn code_rows(cache: &HashMap<BlockId, super::text::TextLayout>) -> HashMap<Block
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t0 = std::time::Instant::now();
-        let el = self.render_editor(window, cx);
+        let t0 = web_time::Instant::now();
+        // A board open over the whole window covers the note: only the board
+        // renders (the note would otherwise be laid out again on every frame
+        // the board draws, and its keys and pointer handlers sit under it).
+        if self.board_open() { return div().size_full().children(self.board_el()).into_any_element(); }
+        if self.table_open() { return div().size_full().children(self.table_el()).into_any_element(); }
+        let el = self.render_editor(window, cx).into_any_element();
         crate::devtools::RENDER_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         el
     }
 }
 
 impl Editor {
+    /// 版本历史 显示改动: the fill behind a block this snapshot added or
+    /// rewrote. None while the toggle is off (the map itself is dropped).
+    pub(super) fn mark_fill(&self, id: BlockId) -> Option<Hsla> {
+        use fdl_core::changes::Change;
+        Some(match self.diff_marks.as_ref()?.get(&id)? {
+            Change::Added => crate::theme::ca(crate::theme::craft::old::G500, 0.10),
+            Change::Changed => crate::theme::ca(crate::theme::craft::old::O500, 0.12),
+        })
+    }
+
     /// "N 字" chip at the bottom right while text is selected (§2).
     fn word_counter(&self) -> Option<AnyElement> {
         let n = if self.core.in_block_mode() {
@@ -1636,7 +1725,7 @@ impl Editor {
                 .text_size(px(12.))
                 .line_height(px(22.))
                 .text_color(Theme::text_caption())
-                .child(if crate::settings::english() { format!("{n} {}", if n == 1 { "word" } else { "words" }) } else { format!("{n} 字") })
+                .child(crate::settings::localized(crate::settings::lang(), "{n} 字", || format!("{n} 字"), || format!("{n} {}", if n == 1 { "word" } else { "words" })))
                 .into_any_element(),
         )
     }
@@ -1750,6 +1839,8 @@ pub(super) fn block_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env
             BlockKind::Image { .. } => self.image(b, env, cx),
             BlockKind::SubPageList => self.sub_page_list(b, cx),
             BlockKind::Countdown(c) => self.countdown(b, c, cx),
+            BlockKind::Board(bd) => self.board_block(b, bd, cx),
+            BlockKind::DataTable(t) => self.datatable_block(b, t, cx),
             BlockKind::File(f) => self.file(b, f, env, cx),
             BlockKind::Table(t) if self.ghost => self.ghost_table(b, t, cx),
             BlockKind::Table(t) => self.table(b, t, env.root, cx),
@@ -1892,6 +1983,9 @@ fn list_item_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env: Env, 
         let spec = self.spec_for(b, env);
         let lh = spec.line_height;
         let id = b.id;
+        // An item that reads right to left (see `text::row_starts`) keeps its
+        // marker on the right, beside the text.
+        let rtl = b.align == crate::model::Align::Left && super::bidi::rtl_line(b.text.text.split('\n').next().unwrap_or(""));
         let marker: AnyElement = match b.kind {
             // Drawn rather than typeset so the dot size (5.5) and its centring
             // on the line don't depend on how the font's bullet glyph renders.
@@ -1902,7 +1996,7 @@ fn list_item_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env: Env, 
                     1 => dot.rounded_full().border_1().border_color(Theme::primary()),
                     _ => dot.size(px(5.)).bg(Theme::primary()),
                 };
-                div().w(px(18.)).pl(px(4.)).mr(px(6.)).flex().child(dot).into_any_element()
+                div().w(px(18.)).when(!rtl, |d| d.pl(px(4.)).mr(px(6.))).when(rtl, |d| d.pr(px(4.)).ml(px(6.)).justify_end()).flex().child(dot).into_any_element()
             }
             BlockKind::Ordered { .. } => div()
                 .id(("ordered-number", id.0))
@@ -1915,7 +2009,8 @@ fn list_item_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env: Env, 
                 }))
                 .min_w(px(18.))
                 .px(px(2.))
-                .mr(px(6.))
+                .when(!rtl, |d| d.mr(px(6.)))
+                .when(rtl, |d| d.ml(px(6.)))
                 .whitespace_nowrap()
                 .font_family(crate::theme::NUMERAL_FONT)
                 .text_size(px(spec.size))
@@ -1927,7 +2022,8 @@ fn list_item_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env: Env, 
                 div()
                     .id(("todo", id.0))
                     .size(px(16.))
-                    .mr(px(8.))
+                    .when(!rtl, |d| d.mr(px(8.)))
+                    .when(rtl, |d| d.ml(px(8.)))
                     .rounded(px(4.))
                     .border_1()
                     .border_color(Theme::text())
@@ -1942,9 +2038,9 @@ fn list_item_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env: Env, 
                         MouseButton::Left,
                         cx.listener(move |e, _, window, cx| {
                             cx.stop_propagation();
-                            window.focus(&e.focus);
+                            window.focus(&e.focus, cx);
                             e.core.toggle_todo(id);
-                            e.changed(window, cx);
+                            e.changed_preserving_viewport(window, cx);
                         }),
                     )
                     .into_any_element()
@@ -1960,6 +2056,7 @@ fn list_item_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env: Env, 
                 div()
                     .id(("row", id.0))
                     .flex()
+                    .when(rtl, |d| d.flex_row_reverse())
                     .when(todo, |d| {
                         d.mx(px(-2.))
                             .px(px(2.))
@@ -2005,6 +2102,7 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
             doc_font: true,
             font: None,
             italic: false,
+            font_runs: None,
         };
         // Line numbers follow the wrapped rows of the last layout.
         let rows_per_line: Vec<usize> = {
@@ -2026,7 +2124,7 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
         // Header: fold triangle, caption at x 29, then the toolbar (22 tall,
         // right-aligned), revealed on hover / while editing.
         let editing = self.focused && self.ed.core.sel.head.block == id;
-        let folded = self.ed.code_folded.contains(&id);
+        let folded = b.folded;
         // Handle hovered / its menu open (`.hovered`): light blue ring
         // over a clear body so the block tint shows; block-selected: blue
         // border on the gray body.
@@ -2126,16 +2224,13 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |e, _, _, cx| {
+                cx.listener(move |e, _, window, cx| {
                     cx.stop_propagation();
-                    if !e.code_folded.remove(&id) {
-                        e.code_folded.insert(id);
-                        // Leave the hidden code (it opens again if the caret comes back).
-                        if e.core.sel.head.block == id || e.core.sel.anchor.block == id {
-                            e.core.select_block(id);
-                        }
-                    }
-                    cx.notify();
+                    // Saved with the document; a caret in the hidden code leaves for the
+                    // block (it opens again if the caret comes back).
+                    e.core.set_code_folded(id, !folded);
+                    e.keep_read_only_fold();
+                    e.changed_preserving_viewport(window, cx);
                 }),
             );
         let border = if menu_on {
@@ -2169,7 +2264,7 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                     .pr(px(8.))
                     .flex()
                     .items_center()
-                    .font_family(theme::UI_FONT)
+                    .font_family(theme::DOC_UI_FONT)
                     .children(caption)
                     .child(
                         div()
@@ -2195,7 +2290,7 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                                                 {
                                                     *wrap = !*wrap;
                                                 }
-                                                e.changed(window, cx);
+                                                e.changed_preserving_viewport(window, cx);
                                             }),
                                         ),
                                 )
@@ -2243,7 +2338,7 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                                         .map(|(i, n)| div().h(px(code_line * *n as f32)).child(format!("{}", i + 1))),
                                 ),
                         )
-                        .child(div().flex_1().min_w_0().overflow_hidden().child(el)),
+                        .child(self.code_column(id, wrap, el, 14.)),
                 )
             })
             .into_any_element()

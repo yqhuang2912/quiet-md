@@ -34,8 +34,8 @@ impl Render for Setup {
         div().size_full().bg(Theme::bg_body()).text_color(Theme::text()).p(px(32.)).pt(px(48.)).flex().flex_col().gap(px(18.))
             .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(self.tr("选择文档库保存位置", "Choose where your notes live")))
             .child(div().text_size(px(13.)).line_height(px(21.)).text_color(Theme::text_caption()).child(self.tr(
-                "笔记、图片、附件和 NAS 同步设置将保存在这里。请选择空文件夹，或选择已有的文档库；后续可在设置中更改。",
-                "Notes, images, attachments and NAS sync settings will be stored here. Choose an empty folder or an existing library. You can change this later in Settings.")))
+                "笔记、图片和附件将保存在这里。请选择空文件夹，或选择已有的文档库；后续可在设置中更改。",
+                "Notes, images and attachments will be stored here. Choose an empty folder or an existing library. You can change this later in Settings.")))
             .child(div().flex().items_center().gap(px(12.)).child(div().flex_1().min_w_0().text_size(px(13.)).child(self.root.display().to_string()))
                 .child(ui::secondary_button("setup-choose", self.tr("选择文件夹…", "Choose folder…")).on_click(cx.listener(|ws, _, window, cx| ws.choose(window, cx)))))
             .when(!self.error.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(Theme::text_caption()).child(self.error.clone())))
@@ -52,7 +52,7 @@ pub fn show(incoming: Incoming, cx: &mut App) {
         window_min_size: Some(size(px(600.), px(360.))),
         titlebar: Some(TitlebarOptions { title: Some("MyNote".into()), ..Default::default() }),
         app_id: Some(crate::APP_ID.into()), ..Default::default()
-    }, |_, cx| cx.new(|_| Setup { root: location::suggested_root(), error: String::new(), english: crate::settings::system_english(), incoming: Some(incoming) }))
+    }, |_, cx| cx.new(|_| Setup { root: location::suggested_root(), error: String::new(), english: crate::settings::english(), incoming: Some(incoming) }))
         .expect("open library setup");
     cx.activate(true);
 }

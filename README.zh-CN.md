@@ -1,16 +1,16 @@
-> 个人分支：Windows/macOS 安装包和自动更新使用 [yqhuang2912/quiet-md Releases](https://github.com/yqhuang2912/quiet-md/releases)。配置与发布说明见 [个人自动更新](docs/PERSONAL_UPDATES.md) 和 [NAS 同步](docs/NAS_SYNC.md)。
+> 个人分支：Windows/macOS 安装包和自动更新使用 [yqhuang2912/quiet-md Releases](https://github.com/yqhuang2912/quiet-md/releases)。配置与发布说明见 [个人自动更新](docs/PERSONAL_UPDATES.md) 和 [文档库位置](docs/LIBRARY_LOCATION.md)。
 
 <h1 align="center">Quiet.md</h1>
 
-> 本地个人版已加入可选的 NAS + Tailscale 桌面同步，部署和使用见 [NAS 同步说明](docs/NAS_SYNC.md)。
+> 使用已挂载的 NAS 共享目录保存笔记，参见[文档库位置](docs/LIBRARY_LOCATION.md)。
 
 <p align="center">
-  <b>一个又快又安静的本地笔记应用。</b><br>
-  Rust + GPUI 原生绘制，笔记全部存在你的电脑上，兼容飞书文档的 DocxXML 格式。
+  <b>又快又安静的笔记，就放在你自己的电脑上。</b><br>
+  用 Rust + GPUI 原生绘制的笔记应用：真实的文件夹，敲下 Markdown 自动排版，笔记里还有一块白板。免费开源。
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · 简体中文 · <a href="README.ja.md">日本語</a>
+  <a href="README.md">English</a> · 简体中文 · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a> · <a href="README.es.md">Español</a> · <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -33,13 +33,13 @@
 <p align="center">
   <a href="https://quiet.md"><b>官网</b></a> ·
   <a href="#下载"><b>下载</b></a> ·
-  <a href="#性能">性能</a> ·
   <a href="#功能">功能</a> ·
+  <a href="#性能">性能</a> ·
   <a href="CONTRIBUTING.md">参与开发</a>
 </p>
 
 <p align="center">
-  <img src="docs/images/home.png" width="100%" alt="Quiet.md 的主页：左侧是文档树，右侧按网格排列所有笔记。">
+  <img src="docs/images/readme-home.webp" width="100%" alt="像素风草坡背景上的 Quiet.md：左侧侧栏列出文件夹，主页把每个文件夹显示成一叠带配图的笔记卡片。">
 </p>
 
 > [!NOTE]
@@ -47,11 +47,51 @@
 
 ## 为什么是 Quiet.md
 
-**⚡ 快，原生的那种快。** 整个界面由 Rust 和 [GPUI](https://www.gpui.rs/) 直接用 GPU 绘制，没有 WebView、没有 Electron。百万字文档实测中，输入、删除和滚动的帧处理 P95 均低于 6 ms。
+**📁 笔记就是普通文件。** 没有账号，没有云端，默认不联网（可选的更新检查除外；白板第一次用到中日韩手写字体、或者你选择可下载的文档字体时，会下载对应的字体文件）。侧栏里的每个文件夹都是磁盘上真实的文件夹，每篇笔记都是一个以标题命名的文件：Markdown 是 `.md`，富文本文档是 `.xml`。用 iCloud、Git 或任何同步工具都行；哪天不用 Quiet.md 了，文件也还在原地。
 
-**🔒 本地优先，文件归你。** 没有账号，没有云端，默认不联网。文档库就是电脑上的一个普通文件夹，每篇笔记是一个 XML 文件。用 Git、iCloud、坚果云或任何同步工具管理都可以，哪天不用了，文件也还在。
+**⚡ 原生，而且快。** 整个界面由 Rust 和 [GPUI](https://www.gpui.rs/) 直接用 GPU 绘制，不是 Electron，也不是网页套壳。在一篇 100 万字的笔记里打字，每帧约 5 ms；120 Hz 屏幕给每帧的时间是 8.3 ms。
 
-**📝 兼容飞书 DocxXML，完整的富文本编辑器。** 笔记直接以飞书文档的 DocxXML 格式保存，从飞书复制粘贴、导入导出都能保留结构。标题、待办、表格、分栏、高亮块、代码、公式、图片和附件，写文档常用的块都有。
+**✍️ 写字和画图，在同一个地方。** 敲 `#`、`-`、`[]` 或 `>`，Markdown 自动排好版。文字说不清的时候，直接在笔记里放一块白板。富文本笔记以飞书文档的 DocxXML 格式保存，从飞书或网页粘贴都能保留结构。
+
+## 功能
+
+### 写
+
+<p align="center">
+  <img src="docs/images/readme-write.webp" width="100%" alt="Quiet.md 里打开的一篇长笔记，有标题、行内公式和一张离子浓度表。">
+</p>
+
+标题、列表、待办、引用、高亮块、分栏、可合并单元格的表格、带语法高亮的代码、LaTeX 公式、图片、附件和封面。边写边用 Markdown 快捷输入，其余的都在 `/` 菜单里。提及另一篇笔记就能链接过去，对方会列出反向引用。
+
+### 画
+
+<p align="center">
+  <img src="docs/images/readme-board.webp" width="100%" alt="Quiet.md 里的一块画板：图片和地图排在一起，配着手写标注、方框和连线箭头。">
+</p>
+
+画板是按 Excalidraw 移植的白板：图形、始终连着的箭头、画笔、文字、便签、分区和图片。可以放进笔记里，也可以存成独立的 `.excalidraw` 文件，excalidraw.com 能直接打开。触控板双指捏合就能缩放；一万个图形的画板依然流畅。
+
+### 用真实的文件夹整理
+
+主页把每个文件夹显示成一叠纸，里面有什么一眼就能看到。把笔记拖到文件夹上停一下，文件夹会自己展开；文件夹里还能再放文件夹，移动可以撤销。笔记可以置顶、收藏；按 `⌘ J` 搜索所有标题和正文，在笔记里查找替换，也可以用正则表达式。删掉的笔记先进回收站。电脑上其他位置的 Markdown 文件和文件夹，可以在「本机文件」里打开，原地编辑。
+
+### 带上旧笔记
+
+<p align="center">
+  <img src="docs/images/readme-import.webp" width="100%" alt="Quiet.md 首次启动的画面，提示导入它找到的 Obsidian 库。">
+</p>
+
+第一次打开时，Quiet.md 会找到你的 Obsidian、Logseq、iA Writer 和 Typora 笔记库并复制进来，原文件不会被改动。Obsidian 的 `[[双链]]` 照样能用，点一下就打开它指向的笔记。之后也可以把 Markdown 文件和文件夹拖到主页，或者直接拖进侧栏的某个文件夹。笔记也能导出成 Markdown 或 PDF，或者直接打印。
+
+### 还有
+
+- **版本历史**：每篇笔记保存时都会留下快照（默认 20 份，最多 30 份）。点开一份就在原处看到改了什么，一键恢复，也可以给它起个名字。
+- **快速笔记**：在 macOS 上，全局快捷键（默认 `⌥ Space`）在任何应用上方打开一个小笔记窗口。
+- **外观**：内置 Craft、飞书、Notion、Obsidian 四种风格，每种都有深色版，也可以用 CSS 自己写（见 [docs/THEMES.md](docs/THEMES.md)）。界面字体和文档字体都能选。
+- **快捷键**：按 `⌘ /` 查看全部快捷键，每一个都能改。在 Windows 和 Linux 上，Ctrl 代替 ⌘，Alt 代替 ⌥。
+- **语言**：英文、简体中文、繁体中文、日文、韩文、西班牙文、法文、阿拉伯文和土耳其文。阿拉伯文正确连写，从右往左排。
+- **清理**：「设置 › 文档库」能找出已经没有笔记在用的图片和文件，确认后才移出。
+- **更新**：新版本在应用内安装，安装前会校验签名。自动检查可以关闭。
 
 ## 下载
 
@@ -66,7 +106,7 @@
 | 平台 | 安装包 | 系统要求 |
 |---|---|---|
 | **macOS**（Apple Silicon） | [quiet-md-macos-arm64.zip](https://github.com/yqhuang2912/quiet-md/releases/latest) | macOS 13 及以上 |
-| **Windows**（x64） | [quiet-md-windows-x64-setup.exe](https://github.com/yqhuang2912/quiet-md/releases/latest) | Windows 10 2004 及以上 |
+| **Windows**（x64） | [quiet-md-windows-x64-setup.exe](https://github.com/yqhuang2912/quiet-md/releases/latest) | Windows 10 1809 及以上 |
 | **Linux**（x86_64，实验性） | [quiet-md-x86_64.AppImage](https://download.quiet.md/latest/quiet-md-x86_64.AppImage) | glibc 2.35 及以上（Ubuntu 22.04 及更新） |
 
 - **macOS**：解压后把 `quiet.md.app` 拖进「应用程序」。安装包已签名并通过 Apple 公证。
@@ -97,14 +137,6 @@
 
 <sub>Apple M5 Pro / 48 GiB，macOS 26.5，Release 构建。测试方法和复现脚本见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)。</sub>
 
-## 功能
-
-- **编辑**：标题、有序 / 无序列表、待办、引用、代码块（语法高亮）、LaTeX 公式、表格（可合并单元格）、高亮块、分栏、图片、附件、封面。支持 `#`、`-`、`[]`、`>` 等 Markdown 快捷输入和 `/` 斜杠菜单。
-- **整理**：文档树、置顶、收藏、全文搜索、回收站。
-- **导入导出**：导入 Markdown 和飞书 DocxXML；导出 Markdown、PDF，也可以直接打印。从飞书或网页粘贴时保留结构。
-- **快捷键**：按 `⌘ /`（Windows 上是 `Ctrl+/`）查看全部快捷键，每一个都能改。快捷键在 Windows 上用 Ctrl 代替 ⌘、Alt 代替 ⌥，应用里和「开始指南」里都按当前系统显示。
-- **主题**：内置 Craft、飞书、Notion、Obsidian 四套风格，也可以用 CSS 自己写，见 [docs/THEMES.md](docs/THEMES.md)。
-
 ## 贡献者
 
 感谢每一位参与 Quiet.md 的人。欢迎提 issue 和 PR，构建、测试和代码约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -113,6 +145,10 @@
 
 ## 近期更新
 
+- **0.1.14**（11 月 22 日）：查找替换支持正则表达式。Obsidian 的 `[[双链]]` 可以点击跳转。新增土耳其语界面，阿拉伯语从右往左排版。可以选择界面字体和文档字体，清理没有笔记用到的图片和文件。文档很多时搜索不再卡顿，批量删除更快。新增「退格键回到标题」开关；Windows 和 Linux 上「复制为 Markdown」改为 Ctrl+Shift+M。
+- **0.1.13**（11 月 17 日）：新增画板，按 Excalidraw 源码移植，可以插在文档里，也可以直接打开 `.excalidraw` 文件，一万个图形也流畅；每篇文档都有版本历史（「…」›「版本历史」）；新增法语和阿拉伯语界面；可以复制为 Markdown、复制文件路径，并在设置里更换文档库文件夹；从网页粘贴的图片会存进文档库。大图页面更省内存，侧栏滚动更顺。
+- **0.1.12**（11 月 14 日）：可以把文件从访达、或从「本机文件」直接拖进侧栏的文件夹或两行之间，拖入时整个页面都是放置区；主页卡片改为连续圆角；新增「在访达中打开」；面包屑从「我的文档」开始；窗口最小宽度给文档区留足空间；全屏时侧栏用不透明底色。修复在文件夹里新建文档时可能卡死的问题。
+- **0.1.11**（11 月 13 日）：文档库改为真实文件夹，文件以标题命名，旧文档库自动迁移并留有备份；全新的首次启动，可设置语言、文档库位置和随手记快捷键，并从 Obsidian 等 Markdown 应用导入笔记；新增日语、西班牙语和韩语界面；Markdown 支持块级公式；文档回到上次的阅读位置；启动更快、内存更省。
 - **0.1.10**（11 月 10 日）：新建菜单可选择文档类型，宽表格支持横向滚动，Markdown 表格保存列对齐，长输入框跟随光标滚动。
 - **0.1.9**（11 月 8 日）：修复 macOS ⌘Q 无法退出、Windows 窗口按钮无响应，以及文字背景色遮挡选区的问题。
 - **0.1.8**（11 月 9 日）：支持本机 Markdown 原地编辑、保留 `.md` 的文件夹导入、多级文件夹与拖动/撤销；优化图片和预览内存占用，修复表格调宽跳页，统一菜单样式；首次启动选择系统支持的语言，新增实验性 Linux AppImage 打包。

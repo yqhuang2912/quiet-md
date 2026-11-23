@@ -1,6 +1,6 @@
 # 个人版本的自动更新
 
-安装包来自 [yqhuang2912/quiet-md 的 GitHub Releases](https://github.com/yqhuang2912/quiet-md/releases)，更新清单保存在同一仓库独立的 `updates` 分支，通过 raw.githubusercontent.com 读取。客户端只接受该仓库对应版本和平台的安装包。原作者的 CDN 和更新公钥不参与个人版本的更新。NAS 同步服务无需修改，也不保存安装包。
+安装包来自 [yqhuang2912/quiet-md 的 GitHub Releases](https://github.com/yqhuang2912/quiet-md/releases)，更新清单保存在同一仓库独立的 `updates` 分支，通过 raw.githubusercontent.com 读取。客户端只接受该仓库对应版本和平台的安装包。原作者的 CDN 和更新公钥不参与个人版本的更新。
 
 客户端启动 10 秒后检查一次，之后每 12 小时检查；也可在「设置 → 关于」手动检查。自动检查可以在「设置 → 通用」关闭。发现新版本后，由用户选择下载和重启安装，退出前仍检查笔记是否保存。没有公开 Release 或对应平台的清单时，显示「暂无已发布更新」。
 
@@ -14,7 +14,7 @@
 
 0.2.0 的清单地址固定在 Release 附件内，迁移后需要手动安装一次 0.2.1 或更高版本。新版会读取独立更新分支，之后恢复应用内更新。笔记和 NAS 配置不受更新清单迁移影响。自定义笔记库位置见[文档库位置](LIBRARY_LOCATION.md)。
 
-Windows 从个人 Release 下载 `quiet-md-<版本>-windows-x64-setup.exe` 并安装一次；以后即可在应用中更新。旧的开发用单文件 EXE 不具备安装信息，需要手动完成这次安装。个人安装包使用独立 AppId、安装目录 `Programs/MyNote` 和快捷方式「Quiet.md MyNote」。笔记仍使用现有 Quiet.md 文档库，已有 NAS 同步配置不变。
+Windows 从个人 Release 下载 `quiet-md-<版本>-windows-x64-setup.exe` 并安装一次；以后即可在应用中更新。旧的开发用单文件 EXE 不具备安装信息，需要手动完成这次安装。个人安装包使用独立 AppId、安装目录 `Programs/MyNote` 和快捷方式「Quiet.md MyNote」。笔记仍使用现有 Quiet.md 文档库。
 
 macOS 只发布 Apple Silicon（M 系列）ZIP，将 `quiet.md.app` 安装到可写的应用目录。个人包默认使用 ad-hoc 签名，并由个人 Minisign 密钥验证更新；没有 Apple Developer ID 公证，首次运行仍可能出现系统确认。具备自己的 Developer ID 和公证配置后，可将 `scripts/release.sh` 的正式签名流程用于发布。已有 Developer ID 应用的更新仍要求相同 Apple 团队。
 

@@ -1,8 +1,10 @@
 //! 本机文件: Markdown files opened where they are (打开文件…, the Finder),
-//! edited in place and listed under 我的文档, last opened first. The library
+//! edited in place and listed under 本机文件, last opened first (folders
+//! opened the same way are `local_folders.rs`). The library
 //! only remembers them: 从列表中移除 never touches the file, and 导入到文档库
 //! makes a copy.
 
+use fdl_core::vfs::PathExt as _;
 use crate::app::{RowMenu, Workspace};
 use crate::settings::tr;
 use crate::store::Entry;
@@ -32,9 +34,9 @@ fn pick(cx: &mut App) -> impl std::future::Future<Output = Option<Vec<PathBuf>>>
 }
 
 impl Workspace {
-    /// 本机文件, last opened first.
+    /// 本机文件 (single files and opened folders, not what is in them), last opened first.
     pub(crate) fn local_entries(&self) -> Vec<&Entry> {
-        let mut v: Vec<&Entry> = self.entries.iter().filter(|e| e.meta.local()).collect();
+        let mut v: Vec<&Entry> = self.entries.iter().filter(|e| e.meta.local() && e.meta.parent.is_none()).collect();
         v.sort_by(|a, b| b.meta.opened.cmp(&a.meta.opened).then_with(|| a.id.cmp(&b.id)));
         v
     }
@@ -50,11 +52,13 @@ impl Workspace {
         .detach();
     }
 
-    /// Open Markdown files where they are (the last one shows); anything
-    /// else is imported as before.
+    /// Open Markdown files and folders where they are (the last file shows);
+    /// anything else is imported as before.
     pub fn open_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
-        let (md, other): (Vec<PathBuf>, Vec<PathBuf>) = paths.iter().cloned().partition(|p| is_markdown_path(p));
+        let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.iter().cloned().partition(|p| p.fs_is_dir());
+        let (md, other): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|p| is_markdown_path(p));
         if !other.is_empty() { self.import_paths(&other, None, true, window, cx); }
+        if !dirs.is_empty() { self.mount_dirs(&dirs, window, cx); }
         let mut last = None;
         for p in &md {
             match self.store.open_local(p) {
@@ -71,8 +75,55 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn open_relative(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.current.as_deref().and_then(|id| self.store.file_path(id)) else { return };
+        let wiki = url.strip_prefix("quiet-wiki:");
+        let (path, anchor) = match wiki {
+            // `[[page]]`, looked up across the vault the way Obsidian does.
+            Some(raw) => {
+                let (name, anchor) = crate::markdown::wiki_parts(raw);
+                let vault = crate::markdown::wiki_vault(&source, self.store.folder_dir(None).as_deref(), &self.store.mount_dirs());
+                (crate::markdown::resolve_wiki(name, &source, &vault).unwrap_or_default(), anchor.to_string())
+            }
+            None => {
+                let (name, anchor) = url.split_once('#').unwrap_or((url, ""));
+                let name = crate::markdown::percent_decode(name);
+                let Some(dir) = source.parent() else { return };
+                (if name.is_empty() { source.clone() } else { dir.join(&name) }, crate::markdown::percent_decode(anchor))
+            }
+        };
+        let Some(path) = path.fs_canonicalize().ok().filter(|p| p.fs_is_file()) else {
+            self.show_toast_kind(ToastKind::Error, tr("文件不存在", "File not found"), cx);
+            return;
+        };
+        if !is_markdown_path(&path) {
+            if matches!(path.extension().and_then(|s| s.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("pdf" | "html" | "htm" | "ppt" | "pptx" | "docx" | "xlsx" | "txt" | "png" | "jpg" | "jpeg")) {
+                cx.open_with_system(&path);
+            } else { cx.reveal_path(&path); }
+            return;
+        }
+        let existing = self.entries.iter().find(|e| self.store.file_path(&e.id).is_some_and(|p| p == path)).map(|e| e.id.clone());
+        let id = existing.or_else(|| self.store.open_local(&path).ok());
+        let Some(id) = id else { return };
+        self.entries = self.store.list();
+        self.sort();
+        if self.try_open(&id, window, cx) && !anchor.is_empty() && let Some(ed) = &self.editor {
+            let key = anchor.to_lowercase();
+            ed.update(cx, |e, cx| {
+                let mut found = None;
+                e.core.doc.for_each_block(|b| {
+                    if found.is_none() && matches!(b.kind, crate::model::BlockKind::Heading { .. }) {
+                        let label = b.text.text.trim().to_lowercase();
+                        if label == key || label.replace(' ', "-") == key { found = Some(b.id); }
+                    }
+                });
+                if let Some(id) = found { e.scroll_to_block(id, cx); }
+            });
+        }
+    }
+
     /// 导入到文档库: a Markdown copy at the top of 我的文档.
-    fn import_local(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn import_local(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.row_menu = None;
         let Some(doc) = self.doc_of(id, cx) else { return };
         let front = self.store.front_matter_of(id);
@@ -99,8 +150,8 @@ impl Workspace {
         let (import, rename, reveal, forget) = (m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone());
         let row = |id: &'static str, glyph: &'static str, label: &'static str| crate::ui::menu_row(id, SharedString::from(id)).child(icon(glyph, 16., Theme::icon())).child(label);
         let pos = if m.pos.x < px(0.) { point(-m.pos.x, m.pos.y + px(22.)) } else { m.pos };
-        let shown = if cfg!(target_os = "macos") { tr("在访达中显示", "Show in Finder") } else if cfg!(target_os = "windows") { tr("在文件资源管理器中显示", "Show in File Explorer") } else { tr("在文件管理器中显示", "Show in File Manager") };
-        vec![deferred(anchored().position(pos).snap_to_window_with_margin(px(8.)).child(popover().id("local-row-menu").occlude().w(px(200.)).py(px(crate::ui::MENU_PAD_Y))
+        let shown = crate::local_folders::show_in_files();
+        vec![deferred(anchored().position(pos).snap_to_window_with_margin(px(8.)).child(popover().id("local-row-menu").occlude().min_w(px(200.)).py(px(crate::ui::MENU_PAD_Y))
             .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.row_menu = None; cx.notify(); }))
             .child(row("lr-import", "folder-input", tr("导入到文档库", "Import into library")).on_click(cx.listener(move |w, _, window, cx| w.import_local(&import, window, cx))))
             .child(row("lr-rename", "square-pen", tr("重命名", "Rename")).on_click(cx.listener(move |w, _, window, cx| w.start_rename(&rename, window, cx))))
@@ -120,23 +171,23 @@ impl Workspace {
 pub struct Incoming(std::rc::Rc<std::cell::RefCell<Vec<PathBuf>>>);
 
 impl Incoming {
-    /// Markdown files named on the command line (Windows and Linux "Open with").
+    /// Markdown files and folders named on the command line (Windows and Linux "Open with").
     pub fn from_args() -> Self {
         let me = Self::default();
-        me.0.borrow_mut().extend(std::env::args_os().skip(1).map(PathBuf::from).filter(|p| is_markdown_path(p) && p.is_file()));
+        me.0.borrow_mut().extend(std::env::args_os().skip(1).map(PathBuf::from).filter(|p| (is_markdown_path(p) && p.fs_is_file()) || p.fs_is_dir()));
         me
     }
 
     pub fn push_urls(&self, urls: Vec<String>) {
-        let paths = urls.iter().filter_map(|u| u.strip_prefix("file://")).map(|p| PathBuf::from(crate::markdown::percent_decode(p)));
-        self.0.borrow_mut().extend(paths.filter(|p| is_markdown_path(p)));
+        let paths = urls.iter().filter_map(|u| u.strip_prefix("file://")).map(|p| PathBuf::from(crate::markdown::percent_decode(p.trim_end_matches('/'))));
+        self.0.borrow_mut().extend(paths.filter(|p| is_markdown_path(p) || p.fs_is_dir()));
     }
 
     /// Hand waiting files to the front main window, now and whenever more arrive.
     pub fn deliver(self, cx: &mut App) {
         cx.spawn(async move |cx| loop {
             if !self.0.borrow().is_empty() {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     let target = cx.active_window().and_then(|w| w.downcast::<Workspace>())
                         .or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<Workspace>()));
                     let Some(target) = target else { return };

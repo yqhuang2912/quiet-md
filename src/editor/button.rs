@@ -252,7 +252,7 @@ impl Editor {
             ButtonAction::OpenLink => {
                 let src = b.src.trim();
                 if is_link_input(src) {
-                    cx.open_url(&normalize(src));
+                    crate::editor::link::open(cx, &normalize(src));
                 } else {
                     self.toast_kind(ToastKind::Error, crate::settings::text("超链接不合法，请重新输入"), cx);
                 }
@@ -356,7 +356,7 @@ impl Editor {
                     .child(icon("pen-line", 18., Theme::icon()))
                     .on_click(cx.listener(move |e, _, window, cx| e.open_button_panel(at_, window, cx))),
             );
-        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Corner::BottomLeft, el))
+        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Anchor::BottomLeft, el))
     }
 
     // ---- 按钮设置
@@ -385,7 +385,7 @@ impl Editor {
         self.dragging = false;
         self.menu = Some(Menu::Button { block: p.block, offset: p.offset });
         let fh = self.btn.text.read(cx).focus_handle(cx);
-        window.focus(&fh);
+        window.focus(&fh, cx);
         cx.notify();
     }
 
@@ -395,7 +395,7 @@ impl Editor {
             self.menu = None;
         }
         self.core.sel = Selection::caret(Pos::new(p.at.block, p.at.offset + EQUATION.len()));
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.restart_blink(window, cx);
         cx.notify();
     }
@@ -431,7 +431,7 @@ impl Editor {
                 if self.btn.panel.as_ref().is_some_and(|p| p.preview.action == ButtonAction::OpenLink) {
                     other.update(cx, |f, cx| f.select_all_text(cx));
                     let fh = other.read(cx).focus_handle(cx);
-                    window.focus(&fh);
+                    window.focus(&fh, cx);
                 }
                 cx.notify();
             }
@@ -477,7 +477,7 @@ impl Editor {
             self.btn.url.update(cx, |f, cx| f.set_text("", cx));
         }
         let fh = self.btn.text.read(cx).focus_handle(cx);
-        window.focus(&fh);
+        window.focus(&fh, cx);
         cx.notify();
     }
 
@@ -653,7 +653,7 @@ impl Editor {
             }))
             .child(content)
             .child(footer);
-        let (pos, corner) = if up { (point(r.left(), r.top() - px(4.)), Corner::BottomLeft) } else { (point(r.left(), r.bottom() + px(4.)), Corner::TopLeft) };
+        let (pos, corner) = if up { (point(r.left(), r.top() - px(4.)), Anchor::BottomLeft) } else { (point(r.left(), r.bottom() + px(4.)), Anchor::TopLeft) };
         Some(at(self.rel(pos), corner, el))
     }
 

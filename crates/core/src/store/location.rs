@@ -22,13 +22,22 @@ fn config_path() -> PathBuf {
 fn default_root() -> PathBuf {
     dirs::document_dir().or_else(|| dirs::home_dir().map(|h| h.join("Documents"))).unwrap_or_else(|| PathBuf::from(".")).join("Quiet.md")
 }
+fn is_library(root: &Path) -> bool {
+    super::Store::is_library(root)
+}
+pub fn set_root(root: &Path) -> Result<()> {
+    ensure!(root.is_absolute() && root.parent().is_some(), "请选择文档库文件夹 / Choose a library folder");
+    let path = config_path();
+    ensure!(!path.starts_with(root), "文档库不能包含应用的位置设置文件 / Choose a library outside the application's location settings folder");
+    save(&path, &Location { root: Some(root.to_path_buf()), confirmed: true, ..Default::default() })
+}
 pub fn suggested_root() -> PathBuf { read(&config_path()).ok().and_then(|c| c.root).unwrap_or_else(default_root) }
 pub fn needs_setup() -> Result<bool> { Ok(!overridden() && !read(&config_path())?.confirmed) }
 fn validate_initial(root: &Path) -> Result<()> {
     ensure!(root.is_absolute() && root.parent().is_some(), "请选择文档库文件夹，不能使用磁盘根目录 / Choose a library folder, not a drive root");
     if root.exists() {
         ensure!(root.is_dir(), "请选择文件夹 / Select a folder");
-        ensure!(fs::read_dir(root)?.next().is_none() || (root.join("docs").is_dir() && root.join("format.json").is_file()), "请选择空文件夹或已有的文档库 / Choose an empty folder or an existing document library");
+        ensure!(fs::read_dir(root)?.next().is_none() || is_library(root), "请选择空文件夹或已有的文档库 / Choose an empty folder or an existing document library");
     }
     Ok(())
 }
@@ -46,7 +55,7 @@ pub fn finish_setup() -> Result<()> {
     let mut config = read(&path)?;
     if config.create {
         let root = config.root.as_ref().context("文档库位置缺失 / Library location missing")?;
-        ensure!(root.join("docs").is_dir() && root.join("format.json").is_file(), "文档库初始化未完成 / Library initialization incomplete");
+        ensure!(is_library(root), "文档库初始化未完成 / Library initialization incomplete");
         config.create = false;
         save(&path, &config)?;
     }
@@ -96,7 +105,7 @@ fn initialize_at(path: &Path, fallback: PathBuf) -> Result<(PathBuf, Option<Stri
     if config.create {
         validate_initial(&root)?;
         fs::create_dir_all(&root)?;
-    } else if config.root.is_some() { ensure!(root.join("docs").is_dir() && root.join("format.json").is_file(), "文档库不可用，请连接磁盘后重试 / Library unavailable; reconnect its disk: {}", root.display()); }
+    } else if config.root.is_some() { ensure!(is_library(&root), "文档库不可用，请连接磁盘后重试 / Library unavailable; reconnect its disk: {}", root.display()); }
     let mut warning = None;
     if let Some(migration) = config.pending.clone() {
         let result = (|| -> Result<()> {
@@ -150,10 +159,12 @@ fn copy_tree(source: &Path, target: &Path, depth: usize) -> Result<()> {
     ensure!(depth <= 128, "文档库目录层级过深 / Library directory nesting is too deep");
     for entry in fs::read_dir(source)? {
         let entry = entry?;
-        if depth == 0 && entry.file_name() == ".lock" { continue; }
+        let name = entry.file_name();
+        if depth == 0 && (name == ".lock" || name == ".nas-sync") { continue; }
+        if depth == 1 && name == ".lock" && source.file_name().is_some_and(|name| name == super::INTERNAL) { continue; }
         let kind = entry.file_type()?;
         ensure!(!kind.is_symlink(), "请先移除文档库中的符号链接 / Remove symbolic links before migrating: {}", entry.path().display());
-        let to = target.join(entry.file_name());
+        let to = target.join(name);
         if kind.is_dir() {
             fs::create_dir(&to)?;
             copy_tree(&entry.path(), &to, depth + 1)?;
@@ -173,9 +184,9 @@ fn copy_tree(source: &Path, target: &Path, depth: usize) -> Result<()> {
 }
 fn copy_library(source: &Path, target: &Path) -> Result<()> {
     let (source, target) = validate(source, target)?;
-    ensure!(source.join("docs").is_dir() && source.join("format.json").is_file(), "原目录不是文档库 / Source is not a document library");
+    ensure!(is_library(&source), "原目录不是文档库 / Source is not a document library");
     // All Store writers use the same lock; no file changes during the snapshot.
-    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(source.join(".lock"))?;
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(if super::Store::flat_at(&source) { source.join(".lock") } else { source.join(super::INTERNAL).join(".lock") })?;
     lock.try_lock().context("文档库正在写入，请退出其他实例后重试 / Library busy; close other instances and retry")?;
     let stage = target.parent().unwrap().join(format!(".mynote-migrate-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&stage)?;
@@ -202,8 +213,8 @@ mod tests {
         let temp = Temp::new();
         let source = temp.0.join("原笔记 库");
         let target = temp.0.join("新位置");
-        for dir in ["docs", "assets", "trash", ".nas-sync"] { fs::create_dir_all(source.join(dir)).unwrap(); }
-        for (file, bytes) in [("docs/note.xml", "note"), ("assets/image.png", "image"), ("trash/index.json", "trash"), ("preferences.json", "prefs"), (".nas-sync/state.json", "state"), (".nas-sync/config.json", "secret"), ("format.json", "{\"format\":3}")] { fs::write(source.join(file), bytes).unwrap(); }
+        for dir in ["docs", "assets", "trash"] { fs::create_dir_all(source.join(dir)).unwrap(); }
+        for (file, bytes) in [("docs/note.xml", "note"), ("assets/image.png", "image"), ("trash/index.json", "trash"), ("preferences.json", "prefs"), ("format.json", "{\"format\":3}")] { fs::write(source.join(file), bytes).unwrap(); }
         fs::create_dir(&target).unwrap();
         let config = temp.0.join("settings/library.json");
         (temp, source, target, config)
@@ -217,7 +228,7 @@ mod tests {
         let (root, warning) = initialize_at(&config, source.clone()).unwrap();
         assert!(warning.is_none(), "{warning:?}");
         assert_eq!(root, plain(&target.canonicalize().unwrap()));
-        for file in ["docs/note.xml", "assets/image.png", "trash/index.json", "preferences.json", ".nas-sync/config.json", ".nas-sync/state.json", "format.json"] { assert_eq!(fs::read(source.join(file)).unwrap(), fs::read(target.join(file)).unwrap()); }
+        for file in ["docs/note.xml", "assets/image.png", "trash/index.json", "preferences.json", "format.json"] { assert_eq!(fs::read(source.join(file)).unwrap(), fs::read(target.join(file)).unwrap()); }
         assert!(read(&config).unwrap().pending.is_none());
         assert_eq!(initialize_at(&config, source).unwrap().0, root);
     }
@@ -260,6 +271,26 @@ mod tests {
         // After first initialization a missing library must never be recreated.
         fs::remove_dir(&target).unwrap();
         assert!(initialize_at(&config, source).is_err());
+    }
+    #[test]
+    fn copies_real_folder_layout_and_resolves_assets_after_legacy_migration() {
+        let (_temp, source, target, _config) = setup();
+        fs::write(source.join("docs/note.xml"), "<title>Note</title>\n<p>Body</p>\n").unwrap();
+        fs::write(source.join("index.json"), "{}").unwrap();
+        super::super::Store::migrate(&source).unwrap();
+        let marker = source.join(".quiet/format.json");
+        assert!(marker.is_file());
+        assert_eq!(super::super::image_path_in(&source, "assets/image.png"), Some(source.join(".assets/image.png")));
+        fs::create_dir(source.join(".nas-sync")).unwrap();
+        fs::write(source.join(".nas-sync/config.json"), "retired settings").unwrap();
+        copy_library(&source, &target).unwrap();
+        assert!(is_library(&target));
+        assert!(!target.join(".nas-sync").exists());
+        assert!(source.join(".nas-sync/config.json").is_file());
+        let mut store = super::super::Store::open_at(target.clone()).unwrap();
+        assert!(store.list().iter().any(|e| e.title == "Note"));
+        assert_eq!(super::super::image_path_in(&target, "assets/image.png"), Some(target.join(".assets/image.png")));
+        assert_eq!(fs::read_to_string(target.join(".assets/image.png")).unwrap(), "image");
     }
     #[test]
     fn portable_asset_paths_survive_relocation_without_old_folder() {

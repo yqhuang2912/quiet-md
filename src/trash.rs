@@ -6,18 +6,21 @@ use crate::app::{Confirm, Workspace};
 use crate::settings::display_title;
 use crate::search::doc_icon;
 use crate::store::{TRASH_DAYS, TrashEntry};
-pub(crate) use crate::ui::{close_button, dialog, list_header_text, list_line, menu_label, primary_button, row_hover, scrim, secondary_button};
+pub(crate) use crate::ui::{ToastKind, close_button, dialog, list_header_text, list_line, menu_label, primary_button, row_hover, scrim, secondary_button};
 use crate::theme::{self, Theme, craft};
 use crate::ui::{ROW_RADIUS, TipExt, TitleBarExt, icon, popover, ui_para, ui_text};
 use gpui::{prelude::FluentBuilder, *};
 
 pub const TRASH_MENU_W: f32 = 160.;
 
+struct ListedTrash { trash: Vec<TrashEntry>, warnings: Vec<String> }
+struct PurgedTrash { errors: Vec<String> }
+
 /// 剩余时间: whole days left before the automatic 彻底删除.
 fn remaining(deleted: u64) -> String {
     let end = deleted + TRASH_DAYS * 86_400;
     let left = end.saturating_sub(crate::time::now());
-    if left < 86_400 { crate::settings::text("即将彻底删除").into() } else { crate::localized_format!("{} 天", "{} days", left.div_ceil(86_400)) }
+    if left < 86_400 { crate::settings::text("即将彻底删除").into() } else { crate::localized_count!(left.div_ceil(86_400), "{} 天", "{} day", "{} days", left.div_ceil(86_400)) }
 }
 
 /// The page header, as tall as the document's so the header pills sit in
@@ -148,7 +151,7 @@ impl Workspace {
                 .on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     let p = ev.position();
-                    w.trash_menu = Some((id.clone(), point(p.x + px(12.), p.y + px(14.)), Corner::TopRight));
+                    w.trash_menu = Some((id.clone(), point(p.x + px(12.), p.y + px(14.)), Anchor::TopRight));
                     cx.notify();
                 }));
             list = list.child(
@@ -163,7 +166,7 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
-                            w.trash_menu = Some((id2.clone(), ev.position, Corner::TopLeft));
+                            w.trash_menu = Some((id2.clone(), ev.position, Anchor::TopLeft));
                             cx.notify();
                         }),
                     )
@@ -260,27 +263,100 @@ impl Workspace {
     }
 
     fn purge_doc(&mut self, id: &str, cx: &mut Context<Self>) {
-        match self.store.purge(id) {
-            Ok(()) => self.show_toast(crate::settings::text("已彻底删除"), cx),
-            Err(e) => self.status = crate::app::SaveStatus::Failed(crate::localized_format!("删除失败：{}", "Could not delete document: {}", crate::settings::diagnostic(&e.to_string()))),
-        }
-        self.trash = self.store.list_trash();
-        self.show_store_warnings(cx);
+        let success = crate::settings::text("已彻底删除");
+        self.purge_trash(vec![id.to_string()], success, cx);
     }
 
     /// 清空回收站: purges every trashed page; stops at the first failure.
     fn empty_trash(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self.store.list_trash().into_iter().map(|t| t.id).collect();
-        match ids.iter().try_for_each(|id| self.store.purge(id)) {
-            Ok(()) => self.show_toast(crate::settings::text("已清空回收站"), cx),
-            Err(e) => self.status = crate::app::SaveStatus::Failed(crate::localized_format!("删除失败：{}", "Could not delete document: {}", crate::settings::diagnostic(&e.to_string()))),
+        let ids: Vec<String> = self.trash.iter().map(|t| t.id.clone()).collect();
+        let success = crate::settings::text("已清空回收站");
+        self.purge_trash(ids, success, cx);
+    }
+
+    fn purge_trash(&mut self, ids: Vec<String>, success: &'static str, cx: &mut Context<Self>) {
+        if self.store.file_task_busy() || self.file_history.busy || self.tree_writes_pending() || ids.is_empty() { return; }
+        let Some(task_guard) = self.store.begin_file_task() else { return };
+        let mut writer = self.store.tree_writer();
+        let gone = ids.clone();
+        let task = cx.background_executor().spawn(async move {
+            // The 回收站's index is written once, not once a page.
+            let errors = writer.purge_many(&gone).err().map(|e| e.to_string()).into_iter().collect();
+            let warnings = writer.take_warnings();
+            let trash = writer.list_trash();
+            (PurgedTrash { errors }, ListedTrash { trash, warnings })
+        });
+        // The rows go now; the 回收站 read back afterwards replaces this.
+        let ids: std::collections::HashSet<String> = ids.into_iter().collect();
+        self.trash.retain(|t| !ids.contains(&t.id));
+        self.trash_menu = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let _task_guard = task_guard;
+            let (done, listed) = task.await;
+            let _ = this.update(cx, |w, cx| {
+                w.trash = listed.trash;
+                let mut errors = done.errors;
+                errors.extend(listed.warnings.iter().map(|s| crate::settings::diagnostic(s)));
+                if errors.is_empty() { w.show_toast(success, cx); }
+                else {
+                    let msg = errors.iter().map(|e| crate::localized_format!("删除失败：{}", "Could not delete document: {}", crate::settings::diagnostic(e))).collect::<Vec<_>>().join("；");
+                    w.show_toast_kind(crate::ui::ToastKind::Error, &msg, cx);
+                    w.status = crate::app::SaveStatus::Failed(msg);
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// What the unused-asset sweep (#237) reads besides the library: the
+    /// sources every open editor holds — this window's and the others',
+    /// quick notes included — that the disk does not (unsaved text, the
+    /// snapshots Undo can still bring back), and the 本机文件 and 本机文件夹,
+    /// whose pasted pictures are copied into the library's assets too.
+    pub(crate) fn sweep_inputs(&self, window: &Window, cx: &Context<Self>) -> (Vec<String>, Vec<std::path::PathBuf>) {
+        let mut live: Vec<String> = self.editor.as_ref().map(|e| e.read(cx).core.asset_refs()).unwrap_or_default();
+        // This window is being updated: reading it again would panic.
+        let me = window.window_handle().window_id();
+        for w in cx.windows().into_iter().filter(|w| w.window_id() != me).filter_map(|w| w.downcast::<Workspace>()) {
+            let Ok(ws) = w.entity(cx) else { continue };
+            if let Some(e) = &ws.read(cx).editor { live.extend(e.read(cx).core.asset_refs()); }
         }
-        self.trash = self.store.list_trash();
-        self.show_store_warnings(cx);
+        let outside = self.entries.iter().filter_map(|e| e.meta.path.as_ref().map(std::path::PathBuf::from)).collect();
+        (live, outside)
+    }
+
+    pub(crate) fn sweep_failed(&mut self, e: &anyhow::Error, cx: &mut Context<Self>) {
+        log::warn!("unused assets: {e:#}");
+        self.show_toast_kind(ToastKind::Error, &crate::localized_format!("无法读取文档库，未清理：{}", "Could not read the library; nothing was removed: {}", e), cx);
+    }
+
+    /// 设置 › 文档库 › 未使用资源 (#237): take away the listed files that are
+    /// still unused. The sweep runs again first, off the UI thread: a page
+    /// restored or a picture brought back by Undo since the list was made
+    /// keeps its file.
+    pub(crate) fn remove_unused_assets(&mut self, names: Vec<(String, u64)>, window: &Window, cx: &mut Context<Self>) {
+        let root = crate::store::Store::root_dir();
+        let (live, outside) = self.sweep_inputs(window, cx);
+        cx.spawn(async move |this, cx| {
+            let gone = cx.background_executor().spawn(async move {
+                let still = crate::store::Store::unused_assets_at(root.clone(), live, outside)?;
+                let names: Vec<String> = names.into_iter().map(|(n, _)| n).filter(|n| still.iter().any(|(s, _)| s == n)).collect();
+                anyhow::Ok(crate::store::Store::remove_unused_assets(&root, &names))
+            }).await;
+            let _ = this.update(cx, |w, cx| match gone {
+                Ok(0) => w.show_toast(crate::settings::text("没有可清理的资源"), cx),
+                Ok(n) => w.show_toast_kind(ToastKind::Success, &crate::localized_format!("已移出 {} 个未使用资源", "Moved {} unused assets out of the asset folder", n), cx),
+                Err(e) => w.sweep_failed(&e, cx),
+            });
+        }).detach();
     }
 
     fn show_store_warnings(&mut self, cx: &mut Context<Self>) {
-        let warnings = self.store.take_warnings();
+        self.show_store_warnings_from(&self.store.take_warnings(), cx);
+    }
+
+    pub(crate) fn show_store_warnings_from(&mut self, warnings: &[String], cx: &mut Context<Self>) {
         if !warnings.is_empty() {
             let msg = warnings.iter().map(|s| crate::settings::diagnostic(s)).collect::<Vec<_>>().join(crate::settings::tr("；", "; "));
             self.show_toast_kind(crate::ui::ToastKind::Error, &msg, cx);
@@ -303,7 +379,7 @@ impl Workspace {
         };
         let (title, body, action, danger) = match c {
             Confirm::Delete { ids, batch } => (
-                if *batch || ids.len() > 1 { crate::localized_format!("是否删除所选的 {} 项？", "Delete the {} selected items?", ids.len()) } else { crate::localized_format!("是否删除： {}？", "Delete {}?", title_of(&ids[0])) },
+                if *batch || ids.len() > 1 { crate::localized_count!(ids.len(), "是否删除所选的 {} 项？", "Delete the {} selected item?", "Delete the {} selected items?", ids.len()) } else { crate::localized_format!("是否删除： {}？", "Delete {}?", title_of(&ids[0])) },
                 crate::settings::text("删除的内容将进入回收站，30 天后自动彻底删除").to_string(),
                 crate::settings::text("删除"),
                 true,
@@ -311,11 +387,18 @@ impl Workspace {
             Confirm::Restore(_) => (crate::settings::text("确认恢复？").to_string(), crate::settings::text("确认后将恢复至原位置").to_string(), crate::settings::text("恢复"), false),
             Confirm::EmptyTrash => (
                 crate::settings::text("确认清空回收站？").to_string(),
-                crate::localized_format!("回收站中的 {} 项将被彻底删除，无法恢复", "The {} items in the Trash will be deleted permanently. This cannot be undone.", self.trash.len()),
+                crate::localized_count!(self.trash.len(), "回收站中的 {} 项将被彻底删除，无法恢复", "The {} item in the Trash will be deleted permanently. This cannot be undone.", "The {} items in the Trash will be deleted permanently. This cannot be undone.", self.trash.len()),
                 crate::settings::text("清空"),
                 true,
             ),
             Confirm::Purge(_) => (crate::settings::text("确认彻底删除？").to_string(), crate::settings::text("彻底删除后，该页面及其子页面将无法恢复").to_string(), crate::settings::text("删除"), true),
+            Confirm::RemoveUnused(files) => (
+                crate::settings::text("清理未使用资源").to_string(),
+                crate::localized_format!("{} 个文件（{}）将移到文档库的 .quiet/removed-assets 文件夹，{} 天后自动删除；在此之前可以从那里拖回 .assets。", "{} files ({}) will be moved to .quiet/removed-assets in the library and deleted after {} days; until then they can be dragged back to .assets.",
+                    files.len(), crate::docinfo::format_size(files.iter().map(|(_, n)| n).sum()), crate::store::TRASH_DAYS),
+                crate::settings::text("移出"),
+                true,
+            ),
             Confirm::Refs { show: false, .. } => (
                 crate::settings::text("是否隐藏引用列表？").to_string(),
                 crate::settings::text("选择隐藏后，协作者将无法查看本文的引用列表。如需重新显示，可点击文档右上角的更多按钮“...”，打开“显示引用列表”开关。").to_string(),
@@ -323,6 +406,50 @@ impl Workspace {
                 false,
             ),
             Confirm::Refs { show: true, .. } => (crate::settings::text("是否显示引用列表？").to_string(), crate::settings::text("选择显示后，协作者可再次查看本文的引用列表。").to_string(), crate::settings::text("显示"), false),
+            Confirm::Migrate(reason) => {
+                use crate::store::{ConsentReason, DeviceHint, SyncService};
+                let why = match reason {
+                    ConsentReason::Synced(SyncService::Provider(p)) => crate::localized_format!("文档库在 {p} 同步的文件夹里。", "The library is in a folder synced by {p}. "),
+                    ConsentReason::Synced(_) => crate::settings::tr("文档库在 iCloud 云盘里。", "The library is in iCloud Drive. ").to_string(),
+                    ConsentReason::OtherDevice(DeviceHint::MissingFile(p)) => crate::localized_format!("这个文档库可能也在别的电脑上使用（打开过的本机文件 {p} 不在这台电脑上）。", "This library may also be used on another computer (a local file it opened, {p}, isn't on this one). "),
+                    ConsentReason::OtherDevice(DeviceHint::SyncCopy(n)) => crate::localized_format!("这个文档库可能也在别的电脑上使用（同步留下了 {n}）。", "This library may also be used on another computer (sync left {n} behind). "),
+                    ConsentReason::Restored => crate::settings::tr("你之前把文档库恢复成了原来的存放方式。", "You went back to the old layout before. ").to_string(),
+                };
+                (
+                    crate::settings::tr("把文档库改为真实文件夹？", "Move the library to real folders?").to_string(),
+                    why + if cfg!(target_os = "macos") { crate::settings::tr(
+                        "改完后，在访达里看到的文件夹和文件就是侧栏里的样子，文件以标题命名。别的电脑上的旧版 Quiet.md 打不开改过的文档库，请先把它们更新到最新版本。原来的文件会在文档库的 .quiet 文件夹里保留 30 天。",
+                        "Afterwards, Finder shows the same folders and files as the sidebar, each file named by its title. Older versions of Quiet.md on other computers can't open the moved library, so update them first. The old files are kept in the library's .quiet folder for 30 days.") }
+                    else if cfg!(target_os = "windows") { crate::settings::tr(
+                        "改完后，在文件资源管理器里看到的文件夹和文件就是侧栏里的样子，文件以标题命名。别的电脑上的旧版 Quiet.md 打不开改过的文档库，请先把它们更新到最新版本。原来的文件会在文档库的 .quiet 文件夹里保留 30 天。",
+                        "Afterwards, File Explorer shows the same folders and files as the sidebar, each file named by its title. Older versions of Quiet.md on other computers can't open the moved library, so update them first. The old files are kept in the library's .quiet folder for 30 days.") }
+                    else { crate::settings::tr(
+                        "改完后，在文件管理器里看到的文件夹和文件就是侧栏里的样子，文件以标题命名。别的电脑上的旧版 Quiet.md 打不开改过的文档库，请先把它们更新到最新版本。原来的文件会在文档库的 .quiet 文件夹里保留 30 天。",
+                        "Afterwards, your file manager shows the same folders and files as the sidebar, each file named by its title. Older versions of Quiet.md on other computers can't open the moved library, so update them first. The old files are kept in the library's .quiet folder for 30 days.") },
+                    crate::settings::tr("改用文件夹", "Move"),
+                    false,
+                )
+            }
+            Confirm::SwitchLibrary(root) => (
+                crate::settings::tr("换用这个文档库？", "Switch to this library?").to_string(),
+                crate::localized_format!("Quiet.md 会保存当前文档并重启，然后打开 {}。原来的文档库留在原处，不会移动或删除，之后可以再换回来。", "Quiet.md saves the open document, restarts and opens {}. The current library stays where it is, nothing is moved or deleted, and you can switch back later.", root.display()),
+                crate::settings::tr("切换并重启", "Switch and Restart"),
+                false,
+            ),
+            Confirm::Import { what, target } => {
+                let place = self.drop_place(target);
+                let what_s = match what {
+                    crate::app::DropImport::Local(id) => crate::localized_format!("「{}」", "“{}”", title_of(id)),
+                    crate::app::DropImport::Files(p) if p.len() == 1 => crate::localized_format!("「{}」", "“{}”", p[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                    crate::app::DropImport::Files(p) => crate::localized_format!("这 {} 项", "these {} items", p.len()),
+                };
+                (
+                    crate::localized_format!("是否将{}导入到「{}」？", "Import {} into “{}”?", what_s, place),
+                    crate::settings::tr("会复制一份到文档库里，原文件不会改动。", "A copy goes into the library; the original file is left as it is.").to_string(),
+                    crate::settings::tr("导入", "Import"),
+                    false,
+                )
+            }
             Confirm::SaveFailed => (
                 crate::settings::text("文档保存失败").to_string(),
                 crate::localized_format!("{}。可以重试或另存副本；重新载入将放弃未保存的修改并载入磁盘内容。", "{}. Retry or save a copy. Reload discards unsaved changes and loads the document from disk.", self.save_error()),
@@ -337,7 +464,7 @@ impl Workspace {
         let ok = primary_button("confirm-ok", action);
         let ok = if danger { ok.bg(Theme::danger()).hover(|s| s.bg(theme::c(craft::R600))).active(|s| s.bg(theme::c(craft::R700))) } else { ok };
         let dialog = dialog("confirm-dialog")
-            .w(px(if matches!(c, Confirm::SaveFailed) { 520. } else { 400. }))
+            .w(px(if matches!(c, Confirm::SaveFailed | Confirm::Migrate(_) | Confirm::SwitchLibrary(_)) { 520. } else { 400. }))
             .px(px(24.))
             .pt(px(20.))
             .pb(px(24.))
@@ -367,7 +494,9 @@ impl Workspace {
                             .child(crate::ui::checkbox(on))
                             .child(ui_text(crate::settings::text("不再提示")))
                     })))
-                    .child(secondary_button("confirm-cancel", crate::settings::text("取消")).on_click(cx.listener(|w, _, _, cx| {
+                    .child(secondary_button("confirm-cancel", if matches!(c, Confirm::Migrate(_)) { crate::settings::tr("稍后", "Later") } else { crate::settings::text("取消") }).on_click(cx.listener(|w, _, _, cx| {
+                        // 稍后 asks again in a week, not at every launch.
+                        if matches!(w.confirm, Some(Confirm::Migrate(_))) { crate::settings::migrate_later(); }
                         w.confirm = None;
                         w.after_save = None;
                         cx.notify();
@@ -393,6 +522,7 @@ impl Workspace {
                             Confirm::Restore(id) => w.restore_doc(&id, cx),
                             Confirm::Purge(id) => w.purge_doc(&id, cx),
                             Confirm::EmptyTrash => w.empty_trash(cx),
+                            Confirm::RemoveUnused(files) => w.remove_unused_assets(files, window, cx),
                             Confirm::Refs { show, no_ask } => {
                                 if no_ask {
                                     let mut s = w.store.settings();
@@ -402,6 +532,9 @@ impl Workspace {
                                 w.set_refs_hidden(!show, cx);
                             }
                             Confirm::SaveFailed => w.resolve_save_failed(true, window, cx),
+                            Confirm::Migrate(_) => w.migrate_library(window, cx),
+                            Confirm::SwitchLibrary(root) => cx.defer(move |cx| crate::app::switch_library(root, cx)),
+                            Confirm::Import { what, target } => w.import_dropped(what, target, window, cx),
                         }
                         cx.notify();
                     }))),

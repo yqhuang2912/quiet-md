@@ -8,7 +8,8 @@ use crate::model::*;
 use std::cell::{Cell, RefCell};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const TITLE: BlockId = BlockId(0);
@@ -340,6 +341,11 @@ fn doc_bytes(doc: &Document) -> usize {
         if let BlockKind::Raw { xml, .. } = &b.kind {
             n += xml.len();
         }
+        // A board is shared between snapshots until it changes; counted once
+        // per snapshot all the same (a rough budget).
+        if let BlockKind::Board(bd) = &b.kind {
+            n += bd.elements.len() * std::mem::size_of::<crate::board::types::Element>();
+        }
     });
     n
 }
@@ -372,13 +378,16 @@ fn keep_outside_history(now: &Document, restored: &mut Document) {
     now.for_each_block(|b| {
         folded.insert(b.id, b.folded);
     });
-    // Blocks in table cells never fold.
+    // Of the blocks in table cells only code blocks fold.
     fn walk(blocks: &mut [Block], folded: &HashMap<BlockId, bool>) {
         for b in blocks {
             if let Some(f) = folded.get(&b.id) {
                 b.folded = *f;
             }
             walk(&mut b.children, folded);
+            if let BlockKind::Table(t) = &mut b.kind {
+                t.rows.iter_mut().flatten().for_each(|cell| walk(&mut cell.blocks, folded));
+            }
         }
     }
     walk(&mut restored.blocks, &folded);
@@ -428,12 +437,17 @@ pub struct Core {
     path_misses: Cell<(u32, u32)>,
     /// A message for the view to toast (e.g. 当前位置不支持粘贴表格).
     pub notice: Option<&'static str>,
+    /// Backspace at the start of the body merges the first paragraph into the
+    /// title and moves the caret there (设置 › 退格键回到标题).
+    pub backspace_to_title: bool,
 }
 
 impl Core {
     pub fn new(doc: Document) -> Self {
         let first = units(&doc).get(1).map(|u| u.id).unwrap_or(TITLE);
-        let start = if doc.title.is_empty() { TITLE } else { first };
+        // Not inside a folded code block: the caret there would open it.
+        let hidden = find_path(&doc.blocks, first).and_then(|p| block_at(&doc.blocks, &p)).is_some_and(|b| b.folded && matches!(b.kind, BlockKind::Code { .. }));
+        let start = if doc.title.is_empty() || hidden { TITLE } else { first };
         Core {
             doc,
             sel: Selection::caret(Pos::new(start, 0)),
@@ -449,6 +463,7 @@ impl Core {
             path_hits: Cell::new(u32::MAX),
             path_misses: Cell::new((0, 1)),
             notice: None,
+            backspace_to_title: false,
         }
     }
 
@@ -595,7 +610,8 @@ impl Core {
             if !out.is_empty() {
                 out.push('\n');
             }
-            out.push_str(&t.text[a.min(b)..b]);
+            // Equations as their LaTeX source (#69): copied text keeps them.
+            out.push_str(&t.slice(a.min(b)..b).plain_text());
         }
         out
     }
@@ -631,6 +647,55 @@ impl Core {
         self.last_edit = None;
         self.dirty = false;
         self.fix_selection();
+    }
+
+    /// Points every image whose source is `from` at `to`, in the document and
+    /// across the undo / redo history, outside the edit history: a pasted web
+    /// image becoming its downloaded copy (#220) is the same picture, so an
+    /// undo must not bring the expiring link back. Whether the document changed.
+    pub fn relink_image(&mut self, from: &str, to: &str) -> bool {
+        fn walk(blocks: &mut [Block], from: &str, to: &str) -> bool {
+            let mut hit = false;
+            for b in blocks {
+                hit |= walk(&mut b.children, from, to);
+                match &mut b.kind {
+                    BlockKind::Image { src, .. } if src == from => { *src = to.to_string(); hit = true; }
+                    BlockKind::Table(t) => for cell in t.rows.iter_mut().flatten() { hit |= walk(&mut cell.blocks, from, to); },
+                    _ => {}
+                }
+            }
+            hit
+        }
+        let has = |doc: &Document| { let mut n = false; doc.for_each_block(|b| n |= matches!(&b.kind, BlockKind::Image { src, .. } if src == from)); n };
+        for s in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if has(&s.doc) { walk(&mut std::sync::Arc::make_mut(s).doc.blocks, from, to); }
+        }
+        let hit = walk(&mut self.doc.blocks, from, to);
+        if hit { self.generation += 1; }
+        hit
+    }
+
+    /// Every file source this editor can still bring back: the cover, images,
+    /// attachments (inline ones too) and 数据表 files of the open document, and
+    /// of the undo and redo snapshots behind it. The unused-asset sweep reads
+    /// the disk, so without these a picture deleted a moment ago — still one
+    /// Undo away — would be taken as unused (#237).
+    pub fn asset_refs(&self) -> Vec<String> {
+        fn take(doc: &Document, out: &mut Vec<String>) {
+            out.extend(doc.cover.as_ref().map(|c| c.src.clone()));
+            doc.for_each_block(|b| {
+                match &b.kind {
+                    BlockKind::Image { src, .. } | BlockKind::File(FileBlock { src, .. }) => out.push(src.clone()),
+                    BlockKind::DataTable(t) => out.push(t.src.clone()),
+                    _ => {}
+                }
+                out.extend(b.text.runs.iter().filter_map(|r| r.marks.inline.as_ref().and_then(Inline::file)).map(|f| f.src.clone()));
+            });
+        }
+        let mut out = vec![];
+        take(&self.doc, &mut out);
+        for s in self.undo.iter().chain(self.redo.iter()) { take(&s.doc, &mut out); }
+        out
     }
 
     pub fn break_coalescing(&mut self) {
@@ -1075,6 +1140,37 @@ impl Core {
         }
     }
 
+    /// 画板: block `id`'s scene replaced (the full-window board closed with
+    /// changes), as one undo step. False when nothing changed.
+    /// `join`: the open board saving as it's edited — every change after
+    /// the session's first joins its undo step.
+    pub fn set_board(&mut self, id: BlockId, bd: crate::whiteboard::Board, join: bool) -> bool {
+        if !matches!(self.kind_of(id), Some(BlockKind::Board(b)) if **b != bd) {
+            return false;
+        }
+        if join {
+            self.generation += 1;
+            self.redo.clear();
+            self.dirty = true;
+        } else {
+            self.checkpoint(EditKind::Other);
+            self.break_coalescing();
+        }
+        if let Some(b) = self.block_mut(id) {
+            b.kind = BlockKind::Board(std::sync::Arc::new(bd));
+        }
+        true
+    }
+
+    /// 数据表: which table and view block `id` shows, and its height. False when nothing changed.
+    pub fn set_table_ref(&mut self, id: BlockId, t: crate::table::TableRef) -> bool {
+        if !matches!(self.kind_of(id), Some(BlockKind::DataTable(old)) if *old != t) { return false; }
+        self.checkpoint(EditKind::Other);
+        self.break_coalescing();
+        if let Some(b) = self.block_mut(id) { b.kind = BlockKind::DataTable(t); }
+        true
+    }
+
     /// 文本视图: the block becomes a paragraph holding the attachment
     /// inline (same alignment); the caret lands after it.
     pub fn file_to_inline(&mut self, id: BlockId) {
@@ -1286,6 +1382,30 @@ impl Core {
             self.delete_atomic(p.block);
             return;
         }
+        // Unless 退格键回到标题 is on, a plain paragraph opening the body never
+        // merges into the title and the caret stays in the body (an empty one
+        // goes when text follows).
+        if !self.backspace_to_title && matches!(block.kind, BlockKind::Text) && !self.parent_is_text_block(p.block) && !self.first_in_quote(p.block) {
+            let us = self.units();
+            if let Some(i) = self.unit_index(&us, p.block)
+                && i > 0
+                && us[i - 1].id == TITLE
+                && us[i].scope.is_none()
+            {
+                if block.text.is_empty()
+                    && block.children.is_empty()
+                    && let Some(next) = us.get(i + 1).filter(|u| u.text && u.scope == us[i].scope && u.id != TITLE)
+                {
+                    let next = next.id;
+                    self.checkpoint(EditKind::Other);
+                    self.break_coalescing();
+                    self.remove_subtree(p.block);
+                    self.normalize();
+                    self.sel = Selection::caret(Pos::new(next, 0));
+                }
+                return;
+            }
+        }
         self.checkpoint(EditKind::Other);
         self.break_coalescing();
         match block.kind {
@@ -1309,16 +1429,18 @@ impl Core {
             return;
         }
         // First paragraph in a quote/callout: lift it out.
-        if let Some(parent) = self.parent_of(p.block).cloned()
-            && matches!(parent.kind, BlockKind::Quote | BlockKind::Callout { .. })
-            && parent.children.first().map(|c| c.id) == Some(p.block)
-        {
+        if self.first_in_quote(p.block) {
+            let parent = self.parent_of(p.block).unwrap().id;
             let b = self.remove_subtree(p.block).unwrap();
-            self.insert_before(parent.id, b);
+            self.insert_before(parent, b);
             self.normalize();
             return;
         }
         self.merge_into_previous(p.block);
+    }
+
+    fn first_in_quote(&self, id: BlockId) -> bool {
+        self.parent_of(id).is_some_and(|q| matches!(q.kind, BlockKind::Quote | BlockKind::Callout { .. }) && q.children.first().map(|c| c.id) == Some(id))
     }
 
     fn merge_into_previous(&mut self, id: BlockId) {
@@ -1790,9 +1912,11 @@ impl Core {
                 if let BlockKind::Code { .. } = k {
                     b.text = RichText::plain(b.text.plain_text());
                 }
-                // A folded heading hides its section, any other fold just the children: drop the fold
-                // rather than hide or reveal the blocks below.
-                if matches!(b.kind, BlockKind::Heading { .. }) != matches!(k, BlockKind::Heading { .. }) {
+                // A folded heading hides its section, a code block its code, any other fold just the
+                // children: drop the fold rather than hide or reveal something else.
+                if matches!(b.kind, BlockKind::Heading { .. }) != matches!(k, BlockKind::Heading { .. })
+                    || matches!(b.kind, BlockKind::Code { .. }) != matches!(k, BlockKind::Code { .. })
+                {
                     b.folded = false;
                 }
                 // Headings, lists and text can all hold children, so the
@@ -1862,6 +1986,23 @@ impl Core {
             b.folded = !b.folded;
         }
         self.fix_selection_after_fold(id);
+    }
+
+    /// Folds or opens a code block (saved like any fold, outside the edit
+    /// history). A caret inside the code it hides leaves for the block itself.
+    /// Returns whether anything changed.
+    pub fn set_code_folded(&mut self, id: BlockId, folded: bool) -> bool {
+        let Some(b) = self.block_mut(id) else { return false };
+        if !matches!(b.kind, BlockKind::Code { .. }) || b.folded == folded {
+            return false;
+        }
+        b.folded = folded;
+        self.generation += 1;
+        self.dirty = true;
+        if folded && self.block_sel.is_none() && (self.sel.head.block == id || self.sel.anchor.block == id) {
+            self.select_block(id);
+        }
+        true
     }
 
     /// The last block a folded heading hides (itself when nothing is hidden),
@@ -2318,6 +2459,34 @@ impl Core {
     /// Nearest enclosing table, if any (block navigation stays inside it).
     /// Tab / Shift+Tab inside a table: caret to the end of the next / previous
     /// cell; Tab in the last cell appends a row. False outside tables.
+    /// ↑/↓ out of a 表格 cell: the stop in the cell above / below, same
+    /// column, or the first stop past the table. `None` when `us[i]` is in no
+    /// table or the step stays inside its cell; `Some(None)` when nothing
+    /// follows the table.
+    pub fn cell_vertical(&self, us: &[Unit], i: usize, down: bool) -> Option<Option<usize>> {
+        let p = self.path(us[i].id)?;
+        let ci = p.iter().rposition(|s| matches!(s, Seg::Cell(..)))?;
+        let Seg::Cell(r, c, _) = p[ci] else { return None };
+        let BlockKind::Table(t) = &block_at(&self.doc.blocks, &p[..ci])?.kind else { return None };
+        // In this table, and in cell `rc` when one is given.
+        let inside = |id: BlockId, rc: Option<(usize, usize)>| {
+            self.path(id).is_some_and(|q| q.len() > ci && q[..ci] == p[..ci] && matches!(q[ci], Seg::Cell(qr, qc, _) if rc.is_none_or(|x| x == (qr, qc))))
+        };
+        let next = if down { Some(i + 1) } else { i.checked_sub(1) };
+        if next.and_then(|n| us.get(n)).is_some_and(|u| inside(u.id, Some((r, c)))) {
+            return None;
+        }
+        let tr = if down { Some(r + (t.rows[r][c].rowspan as usize).max(1)).filter(|&x| x < t.rows.len()) } else { r.checked_sub(1) };
+        let mut order: Box<dyn Iterator<Item = usize>> = if down { Box::new(i + 1..us.len()) } else { Box::new((0..i).rev()) };
+        Some(match tr {
+            Some(tr) => {
+                let to = t.origin(tr, c);
+                order.find(|&k| inside(us[k].id, Some(to)))
+            }
+            None => order.find(|&k| !inside(us[k].id, None)),
+        })
+    }
+
     pub fn cell_step(&mut self, forward: bool) -> bool {
         let h = self.sel.head;
         let Some(p) = self.path(h.block) else { return false };
@@ -2862,7 +3031,7 @@ impl Core {
             ("~", |m| m.underline = true, true),
             ("`", |m| m.code = true, false),
         ];
-        let boundary = |c: Option<char>| c.is_none_or(char::is_whitespace);
+        let boundary = |c: Option<char>| c.is_none_or(|c| c.is_whitespace() || "，。；：！？、）】》”’".contains(c));
         // `$x$` and `$$x$$` become an inline equation.
         for delim in ["$$", "$"] {
             if !before.ends_with(delim) || t.slice(0..p.offset).runs.last().is_some_and(|r| r.marks.code) {
@@ -2871,7 +3040,9 @@ impl Core {
             let inner_end = before.len() - delim.len();
             let Some(open) = before[..inner_end].rfind(delim) else { continue };
             let inner = &before[open + delim.len()..inner_end];
-            if inner.trim().is_empty()
+            let src = crate::paste::markdown_equation_source(inner);
+            let money = delim == "$" && inner.starts_with(|c: char| c.is_ascii_digit()) && !crate::paste::is_numeric_math(inner);
+            if money || inner.trim().is_empty()
                 || inner.starts_with('$')
                 || inner.ends_with('$')
                 || inner.contains(EQUATION)
@@ -2883,7 +3054,7 @@ impl Core {
                 continue;
             }
             let mut marks = t.marks_at(open + delim.len());
-            marks.inline = Some(crate::docxml::to_inline(InlineKind::Equation(inner.to_string())));
+            marks.inline = Some(crate::docxml::to_inline(InlineKind::Equation(src)));
             self.checkpoint(EditKind::Other);
             self.break_coalescing();
             let mut ins = RichText::default();
@@ -3329,6 +3500,26 @@ mod tests {
         c.units()[n].id
     }
 
+    /// #220: a pasted web image relinked to its download, in tables too and
+    /// across undo / redo, so stepping back never revives the expiring link.
+    #[test]
+    fn relink_image_rewrites_document_and_history() {
+        let u = "https://f.cn/a?code=1";
+        let mut c = doc(&format!("<title>t</title><p>x</p><img href=\"{u}\"/><table><tr><td><img href=\"{u}\"/></td></tr></table><img href=\"https://e/b.png\"/>"));
+        c.checkpoint(EditKind::Other);
+        c.doc.blocks.remove(0);
+        c.checkpoint(EditKind::Other);
+        c.doc.blocks.pop();
+        assert!(c.undo());
+        assert!(c.relink_image(u, "/lib/assets/a.png"));
+        assert!(!xml(&c).contains(u) && xml(&c).matches("/lib/assets/a.png").count() == 2 && xml(&c).contains("https://e/b.png"));
+        assert!(c.redo());
+        assert!(!xml(&c).contains(u));
+        assert!(c.undo() && c.undo());
+        assert!(!xml(&c).contains(u) && xml(&c).contains("<p>x</p>"));
+        assert!(!c.relink_image(u, "/lib/assets/a.png"));
+    }
+
     #[test]
     fn file_title_keeps_current_and_history_grapheme_boundaries() {
         for title in ["中文", "👩‍💻笔记", "e\u{301}cole"] {
@@ -3343,6 +3534,27 @@ mod tests {
             assert!(c.undo());
             assert_eq!(c.doc.title.text, title);
         }
+    }
+
+    /// A code block's fold is saved with the document, outside the edit history.
+    #[test]
+    fn code_folds_are_saved_not_undone() {
+        let mut c = doc("<title>T</title><p>a</p><pre lang=\"plaintext\"><code>x</code></pre>");
+        let code = id(&c, 2);
+        c.sel = Selection::caret(Pos::new(code, 1));
+        c.checkpoint(EditKind::Other);
+        c.insert_text("y");
+        assert!(c.set_code_folded(code, true));
+        assert!(!c.set_code_folded(code, true));
+        assert_eq!(c.block_sel_ids(), vec![code], "the caret leaves the hidden code");
+        assert!(xml(&c).contains("<pre lang=\"plaintext\" folded=\"true\"><code>xy</code></pre>"), "{}", xml(&c));
+        assert!(c.undo());
+        assert!(xml(&c).contains("<pre lang=\"plaintext\" folded=\"true\"><code>x</code></pre>"), "{}", xml(&c));
+        assert!(!c.set_code_folded(id(&c, 1), true), "only code blocks");
+        c.turn_into(&[code], BlockKind::Text);
+        assert!(!c.block(code).unwrap().folded, "{}", xml(&c));
+        let c = doc("<title>T</title><pre lang=\"plaintext\" folded=\"true\"><code>x</code></pre>");
+        assert_eq!(c.sel.head.block, TITLE, "opening never starts inside folded code");
     }
 
     #[test]
@@ -3382,6 +3594,22 @@ mod tests {
         let mut c = doc("<title>T</title><hr/><p>a</p>");
         let (hr, a) = (id(&c, 1), id(&c, 2));
         assert!(!c.move_blocks(&[a], hr, DropPlace::FirstChild));
+    }
+
+    /// #237: the unused-asset sweep reads the disk, so an editor has to say
+    /// what it can still bring back — the document, and the snapshots behind it.
+    #[test]
+    fn asset_refs_keep_a_picture_undo_can_bring_back() {
+        let mut c = doc("<title>T</title><img src=\"/lib/.assets/a.png\"/><p>x</p>");
+        assert_eq!(c.asset_refs(), ["/lib/.assets/a.png".to_string()]);
+        c.delete_block(id(&c, 1));
+        assert!(!c.asset_refs().is_empty(), "the picture is one Undo away");
+        assert!(c.asset_refs().iter().any(|s| s.ends_with("a.png")));
+        assert!(c.undo());
+        assert_eq!(c.asset_refs(), ["/lib/.assets/a.png".to_string()]);
+        // The cover is a file of the library's assets as much as a picture is.
+        let c = doc("<title cover=\".assets/c.png\">T</title><p>x</p>");
+        assert_eq!(c.asset_refs(), [".assets/c.png".to_string()]);
     }
 
     #[test]
@@ -3483,6 +3711,51 @@ mod tests {
         assert_eq!(c.units().len(), 3);
         c.enter();
         assert_eq!(xml(&c), "<title>T</title>\n<h1 folded=\"true\">A</h1>\n<p>a1</p>\n<h2>B</h2>\n<p>b1</p>\n<h1></h1>\n<h1>C</h1>\n");
+    }
+
+    #[test]
+    fn backspace_at_body_start_stays_in_body() {
+        // Text, empty or not, never goes into the title, and no undo step is spent.
+        for body in ["abc", ""] {
+            let mut c = doc(&format!("<title>T</title><p>{body}</p>"));
+            let b = id(&c, 1);
+            c.sel = Selection::caret(Pos::new(b, 0));
+            let steps = c.undo.len();
+            c.backspace();
+            c.delete_to_start();
+            assert_eq!(xml(&c), format!("<title>T</title>\n<p>{body}</p>\n"));
+            assert_eq!(c.sel.head, Pos::new(b, 0));
+            assert_eq!(c.undo.len(), steps);
+        }
+        // An empty first line goes when text follows, caret moves down.
+        let mut c = doc("<title>T</title><p></p><h2>x</h2>");
+        c.sel = Selection::caret(Pos::new(id(&c, 1), 0));
+        c.backspace();
+        assert_eq!(xml(&c), "<title>T</title>\n<h2>x</h2>\n");
+        assert_eq!(c.sel.head, Pos::new(id(&c, 1), 0));
+        // Formatted blocks first turn into a paragraph, then stay put.
+        for src in ["<ul><li>a</li></ul>", "<h1>a</h1>", "<blockquote><p>a</p></blockquote>", "<checkbox done=\"false\">a</checkbox>"] {
+            let mut c = doc(&format!("<title>T</title>{src}"));
+            let first = c.units()[1].id;
+            c.sel = Selection::caret(Pos::new(first, 0));
+            c.backspace();
+            assert_eq!(xml(&c), "<title>T</title>\n<p>a</p>\n", "{src}");
+            c.backspace();
+            assert_eq!(xml(&c), "<title>T</title>\n<p>a</p>\n", "{src}");
+            assert_ne!(c.sel.head.block, TITLE);
+        }
+        // 退格键回到标题 brings the old merge back.
+        let mut c = doc("<title>T</title><p>a</p>");
+        c.backspace_to_title = true;
+        c.sel = Selection::caret(Pos::new(id(&c, 1), 0));
+        c.backspace();
+        assert_eq!(c.doc.title.text, "Ta");
+        assert_eq!(c.sel.head, Pos::new(TITLE, 1));
+        // Delete at the end of the title still pulls the body up.
+        let mut c = doc("<title>T</title><p>a</p><p>b</p>");
+        c.sel = Selection::caret(Pos::new(TITLE, 1));
+        c.delete_forward();
+        assert_eq!(xml(&c), "<title>Ta</title>\n<p>b</p>\n");
     }
 
     #[test]
@@ -3727,6 +4000,29 @@ mod tests {
     }
 
     #[test]
+    fn up_down_keep_the_table_column() {
+        let row = |r: usize| format!("<tr>{}</tr>", ["A", "B", "C"].map(|k| format!("<td><p>{k}{r}</p></td>")).concat());
+        let c = doc(&format!("<title>T</title><p>before</p><table>{}{}{}</table><p>after</p>", row(1), row(2), row(3)));
+        let us = c.units();
+        let at = |name: &str| us.iter().position(|u| c.text_of(u.id).is_some_and(|t| t.text == name)).unwrap();
+        let name = |k: Option<usize>| k.map(|k| c.text_of(us[k].id).unwrap().text.clone());
+        assert_eq!(name(c.cell_vertical(&us, at("B2"), false).unwrap()).as_deref(), Some("B1"));
+        assert_eq!(name(c.cell_vertical(&us, at("B2"), true).unwrap()).as_deref(), Some("B3"));
+        assert_eq!(name(c.cell_vertical(&us, at("C1"), false).unwrap()).as_deref(), Some("before"));
+        assert_eq!(name(c.cell_vertical(&us, at("A3"), true).unwrap()).as_deref(), Some("after"));
+        assert_eq!(c.cell_vertical(&us, at("before"), true), None);
+        let c = doc("<title>T</title><table><tr><td><p>a</p></td><td><p>b</p></td></tr></table>");
+        let us = c.units();
+        assert_eq!(c.cell_vertical(&us, 1, true), Some(None));
+        // A cell holding two paragraphs steps between them first.
+        let c = doc("<title>T</title><table><tr><td><p>x</p><p>y</p></td></tr><tr><td><p>z</p></td></tr></table>");
+        let us = c.units();
+        assert_eq!(c.cell_vertical(&us, 1, true), None);
+        assert_eq!(c.cell_vertical(&us, 2, true), Some(Some(3)));
+        assert_eq!(c.cell_vertical(&us, 3, false), Some(Some(2)));
+    }
+
+    #[test]
     fn typed_url_becomes_link() {
         let mut c = doc("<title>T</title><p></p>");
         let b = id(&c, 1);
@@ -3770,7 +4066,15 @@ mod tests {
 
     #[test]
     fn markdown_equations() {
-        for (typed_text, src) in [("x $a^2$", Some("a^2")), ("x $$b$$", Some("b")), ("x$a$", None), ("$ $", None)] {
+        for (typed_text, src) in [
+            ("x $a^2$", Some("a^2")),
+            ("x $$b$$", Some("b")),
+            ("x$a$", None),
+            ("$ $", None),
+            ("价格：$5", None),
+            ("QPS：$1000 / 30 = 33$", Some("1000 / 30 = 33")),
+            ("外推：$1 \\\\times 2 = 2$", Some("1 \\times 2 = 2")),
+        ] {
             let mut c = doc("<title>T</title><p></p>");
             let b = id(&c, 1);
             c.sel = Selection::caret(Pos::new(b, 0));
@@ -3778,8 +4082,8 @@ mod tests {
             let t = c.text_of(b).unwrap().text.clone();
             match src {
                 Some(src) => {
-                    assert_eq!(t, format!("x {EQUATION}"), "{typed_text}");
-                    assert_eq!(c.equation_source(Pos::new(b, 2)).as_deref(), Some(src));
+                    let at = t.rfind(EQUATION).unwrap();
+                    assert_eq!(c.equation_source(Pos::new(b, at)).as_deref(), Some(src), "{typed_text}");
                     assert_eq!(c.sel.head.offset, t.len());
                 }
                 None => assert!(!t.contains(EQUATION), "{typed_text}"),
@@ -3864,6 +4168,51 @@ mod tests {
         c.paste_markdown("A\nB");
         assert_eq!(xml(&c), "<title>TA</title>\n<p>B</p>\n<p>body</p>\n");
         assert_eq!(c.sel.head, Pos::new(id(&c, 1), 1));
+    }
+
+    #[test]
+    fn paste_markdown_display_math_into_nonempty_block() {
+        let mut c = doc("<title>T</title><p>x</p>");
+        let b = id(&c, 1);
+        c.sel = Selection::caret(Pos::new(b, 1));
+        c.paste_markdown("$$\nV = I R\n$$\nafter");
+        assert_eq!(c.doc.blocks[0].text.text, "x");
+        assert_eq!(c.doc.blocks[1].text.text, EQUATION);
+        let equation = c.doc.blocks.iter().find(|b| b.text.text == EQUATION).unwrap();
+        assert_eq!(c.equation_source(Pos::new(equation.id, 0)).as_deref(), Some("V = I R"));
+        assert!(c.doc.blocks.iter().any(|b| b.text.text == "after"));
+    }
+
+    #[test]
+    fn paste_images_at_selection_undo_and_round_trip() {
+        for (body, range, before, after) in [
+            ("前后", 3..3, "前", "后"),
+            ("前删除后", 3..9, "前", "后"),
+            ("", 0..0, "", ""),
+        ] {
+            let mut c = doc(&format!("<title>T</title><p>{body}</p>"));
+            let p = id(&c, 1);
+            c.sel = Selection { anchor: Pos::new(p, range.start), head: Pos::new(p, range.end) };
+            let original = xml(&c);
+            let selection = c.sel;
+            let images = crate::docxml::parse("<title></title><img src=\"a.png\"/><img src=\"b.png\"/><p></p>").unwrap();
+            c.paste_blocks(images.blocks);
+            let blocks = &c.doc.blocks;
+            let first = usize::from(!before.is_empty());
+            assert_eq!(blocks.len(), first + 3);
+            if first > 0 { assert_eq!(blocks[0].text.text, before); }
+            assert!(matches!(&blocks[first].kind, BlockKind::Image { src, .. } if src == "a.png"));
+            assert!(matches!(&blocks[first + 1].kind, BlockKind::Image { src, .. } if src == "b.png"));
+            assert_eq!(blocks[first + 2].text.text, after);
+            assert_eq!(c.sel, Selection::caret(Pos::new(blocks[first + 2].id, 0)));
+            let pasted = xml(&c);
+            assert_eq!(xml(&doc(&pasted)), pasted);
+            assert!(c.undo());
+            assert_eq!(xml(&c), original);
+            assert_eq!(c.sel, selection);
+            assert!(c.redo());
+            assert_eq!(xml(&c), pasted);
+        }
     }
 
     #[test]
@@ -4016,6 +4365,16 @@ mod tests {
     }
 
     #[test]
+    fn selected_text_keeps_equations() {
+        let mut c = doc("<title>T</title><p>ab</p>");
+        let b = id(&c, 1);
+        c.sel = Selection::caret(Pos::new(b, 1));
+        let p = c.insert_equation("X_t").unwrap();
+        c.sel = Selection { anchor: Pos::new(b, 0), head: Pos::new(b, p.offset + EQUATION.len() + 1) };
+        assert_eq!(c.selected_text(), "aX_tb");
+    }
+
+    #[test]
     fn select_all_escalates() {
         let mut c = doc("<title>T</title><p>x</p><callout><p>ab</p></callout>");
         let (x, ab) = (id(&c, 1), id(&c, 2));
@@ -4039,5 +4398,22 @@ mod tests {
         c.select_block(hr);
         c.enter_from_block_sel();
         assert_eq!(c.units().len(), 4);
+    }
+
+    /// ⌥← / ⌥→ in a text field land where the editor's do.
+    #[test]
+    fn words_are_moved_past_whole_words() {
+        let s = "rename this file";
+        assert_eq!(next_word(s, 0), 6);
+        assert_eq!(next_word(s, 6), 11);
+        assert_eq!(prev_word(s, 11), 7);
+        assert_eq!(prev_word(s, 6), 0);
+        // Runs of spaces are skipped, not stopped in.
+        assert_eq!(next_word("rename  this", 6), 12);
+        assert_eq!(prev_word("  this", 6), 2);
+        // Chinese has no spaces between words: a stop per character, as in the
+        // editor.
+        assert_eq!(next_word("中文标题", 0), 3);
+        assert_eq!(prev_word("中文标题", 12), 9);
     }
 }

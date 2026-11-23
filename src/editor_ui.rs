@@ -9,7 +9,7 @@ pub fn popover() -> Div {
         .border_color(Theme::line_border())
         .rounded(px(6.))
         .shadow(theme::shadow_menu())
-        .font_family(theme::UI_FONT)
+        .font_family(theme::ui_family())
         .text_color(Theme::text())
 }
 pub fn panel() -> Div {
@@ -19,7 +19,7 @@ pub fn panel() -> Div {
         .border_color(Theme::line_border())
         .rounded(px(6.))
         .shadow(theme::shadow_panel())
-        .font_family(theme::UI_FONT)
+        .font_family(theme::ui_family())
         .text_color(Theme::text())
 }
 pub const MENU_RADIUS: f32 = 6.;

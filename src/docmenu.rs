@@ -1,5 +1,6 @@
 //! The header "…" menu: page width, find & replace, move, pin, star,
-//! duplicate, 下载为 PDF / Markdown, 打印, document info and delete.
+//! duplicate, 下载为 PDF / Markdown, 复制为 Markdown, 打印, document info,
+//! 阅读模式 and 显示引用列表 switches, delete.
 
 use crate::app::Workspace;
 use crate::settings::display_title;
@@ -12,8 +13,6 @@ use gpui::{prelude::FluentBuilder, *};
 pub enum DocSub {
     Width,
     Download,
-    /// 更多: 显示引用列表.
-    More,
 }
 
 const MENU_W: f32 = 200.;
@@ -42,6 +41,20 @@ fn menu_item(id: &'static str, ic: &'static str, label: impl Into<SharedString>,
 /// 下载为's text-only items.
 pub(crate) fn sub_item(id: &'static str, label: &'static str) -> Stateful<Div> {
     crate::ui::menu_row(id, SharedString::from(id)).mx(px(0.)).child(crate::ui::menu_label(label, SharedString::from(id), gpui::white()))
+}
+
+/// A row's on/off switch.
+fn switch(on: bool) -> Div {
+    div()
+        .flex_none()
+        .w(px(28.))
+        .h(px(16.))
+        .rounded_full()
+        .p(px(2.))
+        .flex()
+        .when(on, |d| d.justify_end())
+        .bg(if on { Theme::primary_500() } else { Theme::block_placeholder() })
+        .child(div().size(px(12.)).rounded_full().bg(crate::theme::raised(Theme::bg_body())))
 }
 
 /// Native-menu separator: 1px, 5px either side, inset 13px.
@@ -102,7 +115,14 @@ impl Workspace {
         doc.title = crate::model::RichText::plain(title);
         let width = self.entries.iter().find(|e| e.id == id).map(|e| e.meta.width).unwrap_or_default();
         // A Markdown file copies as Markdown, into the library even from a 本机文件.
-        let made = if self.store.is_markdown(id) { let front = self.store.front_matter_of(id); self.store.create_markdown(&doc, &front) } else { self.store.create_from(&doc) };
+        // A 画板 copies as a 画板.
+        let board = self.entries.iter().find(|e| e.id == id).filter(|e| e.meta.kind == crate::store::DocKind::Board)
+            .map(|_| doc.blocks.iter().find_map(|b| match &b.kind { crate::model::BlockKind::Board(bd) => Some(bd.clone()), _ => None }).unwrap_or_default());
+        let table = self.entries.iter().any(|e| e.id == id && e.meta.kind == crate::store::DocKind::Table);
+        if table { crate::table::flush_all(cx); }
+        let made = if table { self.store.copy_table(id, &doc.title.text) }
+            else if let Some(board) = board { self.store.create_board_in(&doc.title.text, &board, None) }
+            else if self.store.is_markdown(id) { let front = self.store.front_matter_of(id); self.store.create_markdown(&doc, &front) } else { self.store.create_from(&doc) };
         match made {
             Ok(new) => {
                 let _ = self.store.set_width(&new, width);
@@ -120,6 +140,8 @@ impl Workspace {
     /// 查找和替换 (also ⌘F / ⌘⇧H).
     pub fn find_in_doc(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.close_doc_menu(cx);
+        // the document's text is hidden under an open board
+        if self.editor.as_ref().is_some_and(|e| e.read(cx).board_open()) { return; }
         if let Some(ed) = &self.editor {
             ed.update(cx, |e, cx| e.open_find(replace, window, cx));
         }
@@ -135,6 +157,11 @@ impl Workspace {
         let starred = entry.is_some_and(|e| e.meta.starred > 0);
         let width = entry.map(|e| e.meta.width).unwrap_or_default();
         let refs_shown = !entry.is_some_and(|e| e.meta.refs_hidden);
+        // An open board isn't the page: no page width, find in its text or
+        // editor shortcuts; a standalone board file has no Markdown or
+        // references either
+        let (board, board_file) = self.editor.as_ref().map_or((false, false), |e| { let e = e.read(cx); (e.board_open(), e.board_file) });
+        let reading = self.reading();
         let sub = self.doc_sub;
         let hover_sub = |s: Option<DocSub>| {
             cx.listener(move |w: &mut Workspace, hovered: &bool, _, cx| {
@@ -145,21 +172,30 @@ impl Workspace {
             })
         };
         let sub_bounds = self.doc_sub_bounds.clone();
+        // The menu follows its longest translation (#225); its rendered width
+        // (from the previous frame — a submenu only opens after one) places
+        // the submenus that open to its left.
+        let menu_w_record = self.doc_menu_w.clone();
+        let menu_w = move || {
+            let record = menu_w_record.clone();
+            canvas(move |b, _, _| record.set(Some(f32::from(b.size.width))), |_, _, _, _| {}).absolute().inset_0()
+        };
         let (pin_id, star_id, mv_id, del_id, dup_id, print_id) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
         let menu = popover()
             .id("doc-menu")
             .occlude()
-            .w(px(MENU_W))
+            .min_w(px(MENU_W))
             .py(px(PAD))
             .flex()
             .flex_col()
             .shadow(theme::shadow_s4_down())
+            .child(menu_w())
             .on_mouse_down_out(cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
                 if sub_bounds.get().is_none_or(|b| !b.contains(&ev.position)) {
                     w.close_doc_menu(cx);
                 }
             }))
-            .child(
+            .when(!board, |d| d.child(
                 menu_item("dm-width", "page-width", crate::settings::text("页宽设置"), true, sub == Some(DocSub::Width))
                     .on_hover(hover_sub(Some(DocSub::Width))),
             )
@@ -169,7 +205,7 @@ impl Workspace {
                     .on_hover(hover_sub(None))
                     .on_click(cx.listener(|w, _, window, cx| w.find_in_doc(false, window, cx))),
             )
-            .child(divider())
+            .child(divider()))
             .child(
                 menu_item("dm-move", "folder-input", crate::settings::text("移动到"), false, false)
                     .on_hover(hover_sub(None))
@@ -207,6 +243,17 @@ impl Workspace {
                 menu_item("dm-download", "export", crate::settings::text("下载为"), true, sub == Some(DocSub::Download))
                     .on_hover(hover_sub(Some(DocSub::Download))),
             )
+            .when(!board_file, |d| d.child(
+                menu_item("dm-copy-md", "doc-md", crate::settings::text("复制为 Markdown"), false, false)
+                    .on_hover(hover_sub(None))
+                    .on_click(cx.listener(|w, _, _, cx| {
+                        w.close_doc_menu(cx);
+                        if let Some(ed) = w.editor.clone() {
+                            ed.update(cx, |e, cx| e.copy_markdown(cx));
+                            w.show_toast(crate::settings::text("已复制为 Markdown"), cx);
+                        }
+                    })),
+            ))
             .child(divider())
             .when(crate::printing::SUPPORTED, |d| d.child(
                 menu_item("dm-print", "printer", crate::settings::text("打印"), false, false)
@@ -218,15 +265,42 @@ impl Workspace {
                     .on_hover(hover_sub(None))
                     .on_click(cx.listener(|w, _, window, cx| w.open_doc_info(window, cx))),
             )
+            .child(
+                menu_item("dm-history", "restore", crate::settings::tr("版本历史", "Version history"), false, false)
+                    .on_hover(hover_sub(None))
+                    .on_click(cx.listener(|w, _, window, cx| {
+                        w.close_doc_menu(cx);
+                        if let Some(id) = w.current.clone() { w.open_history(&id, window, cx) }
+                    })),
+            )
             .child(divider())
-            // 更多 and 删除 share the last group.
-            .child(menu_item("dm-more", "ellipsis", crate::settings::text("更多"), true, sub == Some(DocSub::More)).on_hover(hover_sub(Some(DocSub::More))))
+            // (a board file has no reading mode or references)
+            .when(!board_file, |d| d.child(
+                menu_item("dm-read", "eye-open", crate::settings::text("阅读模式"), false, false)
+                    .child(switch(reading))
+                    .on_hover(hover_sub(None))
+                    .on_click(cx.listener(move |w, _, window, cx| {
+                        w.close_doc_menu(cx);
+                        w.set_mode(!reading, window, cx);
+                    })),
+            )
+            .child(
+                menu_item("dm-refs", "list", crate::settings::text("显示引用列表"), false, false)
+                    .child(switch(refs_shown))
+                    .on_hover(hover_sub(None))
+                    .on_click(cx.listener(move |w, _, _, cx| {
+                        w.close_doc_menu(cx);
+                        w.ask_refs(!refs_shown, cx);
+                    })),
+            )
+            .child(divider()))
             .child(
                 menu_item("dm-delete", "bin", crate::settings::text("删除"), false, false)
                     .on_hover(hover_sub(None))
                     .on_click(cx.listener(move |w, _, _, cx| w.ask_delete(&del_id, cx))),
             )
-            .child(divider())
+            // (a board has its own shortcut help, `?`)
+            .when(!board, |d| d.child(divider())
             .child(
                 menu_item("dm-shortcuts", "keyboard", crate::settings::text("快捷键"), false, false)
                     .on_hover(hover_sub(None))
@@ -235,18 +309,18 @@ impl Workspace {
                         w.shortcuts = true;
                         cx.notify();
                     })),
-            );
+            ));
         let vw = window.viewport_size().width;
         let btn = self.more_btn_bounds.get();
         let right = btn.map_or(vw - px(120.), |b| b.right());
         let menu_top = btn.map_or(px(60.), |b| b.bottom() + px(MENU_GAP));
         let mut out = vec![
-            deferred(anchored().anchor(Corner::TopRight).position(point(right, menu_top)).child(menu))
+            deferred(anchored().anchor(Anchor::TopRight).position(point(right, menu_top)).child(menu))
                 .with_priority(2)
                 .into_any_element(),
         ];
         // Submenus open to the left, 4px from the menu, level with their item.
-        let sub_at = point(right - px(MENU_W + 4.), px(0.));
+        let sub_at = point(right - px(self.doc_menu_w.get().unwrap_or(MENU_W) + 4.), px(0.));
         let item_top = |k: usize, d: usize| f32::from(menu_top) + item_top(k, d);
         let record = self.doc_sub_bounds.clone();
         record.set(None);
@@ -254,17 +328,19 @@ impl Workspace {
             let record = record.clone();
             canvas(move |b, _, _| record.set(Some(b)), |_, _, _, _| {}).absolute().inset_0()
         };
+        // the items and dividers above a submenu's item that aren't shown
+        let hidden = if board { (2, 2) } else { (0, 0) };
         let sub_el = match sub {
             Some(DocSub::Width) => Some((item_top(0, 0) - 1. - PAD, self.width_panel(width, cx).child(recorder()).into_any_element())),
             // Level the submenu's first item with 下载为.
             Some(DocSub::Download) => Some((
-                item_top(6, 3) - 1. - PAD,
+                item_top(6 - hidden.0, 3 - hidden.1) - 1. - PAD,
                 {
                     let pdf = id.clone();
                     popover()
                         .id("dm-download-menu")
                         .occlude()
-                        .w(px(130.))
+                        .min_w(px(130.))
                         .px(px(5.))
                         .py(px(PAD))
                         .child(recorder())
@@ -273,42 +349,11 @@ impl Workspace {
                         .into_any_element()
                 },
             )),
-            Some(DocSub::More) => Some((
-                if crate::printing::SUPPORTED { item_top(9, 6) } else { item_top(8, 5) } - 1. - PAD,
-                popover()
-                    .id("dm-more-menu")
-                    .occlude()
-                    .w(px(210.))
-                    .px(px(5.))
-                    .py(px(PAD))
-                    .child(recorder())
-                    .child(
-                        sub_item("dm-refs", crate::settings::text("显示引用列表"))
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .w(px(28.))
-                                    .h(px(16.))
-                                    .rounded_full()
-                                    .p(px(2.))
-                                    .flex()
-                                    .when(refs_shown, |d| d.justify_end())
-                                    .bg(if refs_shown { Theme::primary_500() } else { Theme::block_placeholder() })
-                                    .child(div().size(px(12.)).rounded_full().bg(crate::theme::raised(Theme::bg_body()))),
-                            )
-                            .on_click(cx.listener(move |w, _, _, cx| {
-                                w.close_doc_menu(cx);
-                                w.ask_refs(!refs_shown, cx);
-                            })),
-                    )
-                    .into_any_element(),
-            )),
             None => None,
         };
         if let Some((top, el)) = sub_el {
             out.push(
-                deferred(anchored().anchor(Corner::TopRight).position(point(sub_at.x, px(top))).snap_to_window_with_margin(px(8.)).child(el))
+                deferred(anchored().anchor(Anchor::TopRight).position(point(sub_at.x, px(top))).snap_to_window_with_margin(px(8.)).child(el))
                     .with_priority(2)
                     .into_any_element(),
             );

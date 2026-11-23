@@ -1,6 +1,6 @@
 [package]
 name = "quiet_md"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 description = "A fast, local-first rich text notes app for macOS and Windows, drawn with GPUI and compatible with Feishu DocxXML"
 license = "MIT"
@@ -11,12 +11,22 @@ categories = ["text-editors"]
 
 # `devtools`: the FDL_SCRIPT driver for tools/harness (`cargo build --release
 # --features devtools`). Off in release builds: shipped apps cannot be scripted.
+# `datatable`: 数据表 (`.sqlite` tables, `BlockKind::DataTable`) while it is
+# still being polished. Off: no way to make one; existing ones show a read-only
+# placeholder and are left as they are (`crate::DATATABLE`).
 [features]
-devtools = []
+devtools = ["embed-xiaolai"]
+# `embed-xiaolai`: the board's CJK font (14 MB) compiled in instead of fetched
+# when first needed (src/font_downloads.rs). On with `devtools`, so harness
+# screenshots never depend on the network; off in shipped builds.
+embed-xiaolai = []
+datatable = []
 
 # `fdl_core` is the GPUI-free document engine; plain `cargo test` covers both.
 [workspace]
 members = ["crates/core"]
+# vendor/zed holds path dependencies with self-contained manifests, not members.
+exclude = ["vendor", "tools/vendor-sync"]
 default-members = [".", "crates/core"]
 
 [dependencies]
@@ -24,28 +34,68 @@ fdl_core = { path = "crates/core" }
 anyhow = "1.0.104"
 async-lock = "3.4"
 dirs = "7.0.0"
-gpui = "0.2.2"
+gpui = { path = "vendor/zed/crates/gpui" }
 quick-xml = "0.37"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 unicode-segmentation = "1.13.3"
 uuid = { version = "1.28.0", features = ["v4"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
 raw-window-handle = "0.6"
 rustc-hash = "2.1"
+web-time = { version = "1", features = ["serde"] }
 katex-rs = { version = "0.3", default-features = false }
 regex = "1"
 html5ever = "0.27"
 markup5ever_rcdom = "0.3"
 base64 = "0.22"
+# the board's 复制为 PNG rasterizes its SVG (the same resvg GPUI draws SVGs with)
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+# the board's Xiaolai font is stored deflated (src/board/fonts.rs)
+miniz_oxide = "0.9"
+# 设置's font lists read what each installed family is (src/font_classes.rs)
+ttf-parser = "0.25"
 minisign-verify = "0.3.0"
+sha2 = "0.10.9"
 log = "0.4"
 sys-locale = "0.3.2"
+jpeg-decoder = { version = "0.3", default-features = false }
+png = "0.18"
+icu_plurals = "2.4.0"
+icu_locale_core = "2.4.0"
+# 画板's CPU renderer above a scene size (src/board/render_vello.rs), on every
+# platform; its frames are shown with GPUI's `Window::paint_pixels`.
+vello_cpu = { version = "=0.3.0", default-features = false, features = ["std", "u8_pipeline", "multithreading"] }
+
+# The web build (wasm32, a live demo for the site) runs single-threaded on stable.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+gpui_platform = { path = "vendor/zed/crates/gpui_platform", features = ["font-kit", "wayland", "x11"] }
+# 本机文件夹: deleting moves to the system's trash (src/system_trash.rs).
+trash = "5.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+gpui_platform = { path = "vendor/zed/crates/gpui_platform", default-features = false }
+gpui_web = { path = "vendor/zed/crates/gpui_web", default-features = false }
+futures = "0.3"
+uuid = { version = "1.28.0", features = ["v4", "js"] }
+sys-locale = { version = "0.3.2", features = ["js"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Window", "Navigator", "Location", "Document", "Element", "Request", "Response", "Url", "UrlSearchParams"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"
 core-foundation = "=0.10.0"
 objc = "0.2"
+
+# editor::text::tests drives the macOS text system directly.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { path = "vendor/zed/crates/gpui_apple", features = ["font-kit"] }
+
+# A window-less text system for the bundled emoji font test (src/editor/emoji.rs).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gpui_wgpu = { path = "vendor/zed/crates/gpui_wgpu" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry = "0.5"
@@ -53,14 +103,32 @@ windows-registry = "0.5"
 webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Memory", "Win32_UI_Controls_Dialogs", "Win32_UI_WindowsAndMessaging"] }
 
-# GPUI 0.2.2 with local changes: glyphs are rasterized without font
-# smoothing (Feishu's `-webkit-font-smoothing: antialiased`) and grids take
-# explicit pixel column widths. Taffy 0.9.0 with the beyond-limits fix for
-# items spanning several auto rows (merged table cells).
-[patch.crates-io]
-gpui = { path = "vendor/gpui" }
-taffy = { path = "vendor/taffy" }
-xattr = { path = "vendor/xattr" }
+# GPUI is vendored from the Zed repository: an upstream snapshot plus our
+# patch series, kept in sync by tools/vendor-sync (vendor/PATCHES.md).
+
+# Shipped packages (scripts/release.sh and the other packaging scripts) build
+# with `--profile dist` into target/dist: whole-program LTO and no symbol table,
+# a third smaller than `release`. `release` stays the quick everyday build that
+# tests, the harness and the preview use. Line tables go to a separate file
+# (quiet_md.dSYM, .pdb, .dwp) that release.sh keeps beside the package, so
+# the raw addresses a panic logs can still be resolved (src/logging.rs).
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = "line-tables-only"
+split-debuginfo = "packed"
+
+# The web demo (web/build.sh): small over fast, then wasm-opt -Oz.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+panic = "abort"
 
 # `objc`'s msg_send! checks `feature = "cargo-clippy"`, which rustc no longer
 # knows about.

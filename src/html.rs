@@ -49,6 +49,7 @@ pre { margin: 16px 0; padding: 12px 16px; background: #fbfbfb; border: 1px solid
 .lang { font-size: 12px; color: #737477; margin-bottom: 6px; font-family: -apple-system, "PingFang SC", sans-serif; }
 hr { border: none; height: 2px; margin: 11px 0; background: radial-gradient(circle, rgba(31,34,37,0.5) 0.75px, transparent 1px) 0 0 / 5px 2px repeat-x; }
 .img { margin: 13px 0; }
+.board { margin: 13px 0; text-align: center; } .board svg { max-width: 100%; height: auto; vertical-align: top; }
 .img img { max-width: 100%; vertical-align: top; border-radius: 5px; }
 .img .cap { margin-top: 6px; }
 .crop { display: inline-block; overflow: hidden; max-width: 100%; vertical-align: top; border-radius: 5px; }
@@ -228,6 +229,25 @@ impl Writer<'_> {
                 let _ = write!(out, "<div class=\"b\"{align}>{}", esc(&f.name));
                 out.push_str("</div>");
             }
+            // A 数据表 as a plain table of the view it shows.
+            BlockKind::DataTable(t) => {
+                let grid = fdl_core::table::block_grid(&crate::store::Store::root_dir(), t);
+                if !grid.is_empty() {
+                    out.push_str("<table>");
+                    for (i, row) in grid.iter().enumerate() {
+                        out.push_str("<tr>");
+                        for cell in row { let _ = write!(out, "<{0}>{1}</{0}>", if i == 0 { "th" } else { "td" }, esc(cell)); }
+                        out.push_str("</tr>");
+                    }
+                    out.push_str("</table>");
+                }
+            }
+            // A 画板 as an inline SVG of its scene (images inlined).
+            BlockKind::Board(bd) => {
+                if !bd.elements.is_empty() {
+                    let _ = write!(out, "<div class=\"board\">{}</div>", bd.svg_in(&crate::store::Store::root_dir()));
+                }
+            }
             BlockKind::Countdown(c) => {
                 // The add-on's face as of the export.
                 let left = c.remaining(crate::time::now_ms());
@@ -334,7 +354,7 @@ fn image(uri: &str, width: Option<f32>, height: Option<f32>, crop: Option<[f32; 
 fn data_uri(src: &str) -> Option<String> {
     use base64::Engine;
     if src.starts_with("data:") {
-        let encoded = ["data:image/png;base64,", "data:image/jpeg;base64,", "data:image/gif;base64,", "data:image/webp;base64,"]
+        let encoded = ["data:image/png;base64,", "data:image/jpeg;base64,", "data:image/jpg;base64,", "data:image/gif;base64,", "data:image/webp;base64,", "data:image/bmp;base64,"]
             .iter().find_map(|prefix| src.strip_prefix(prefix))?;
         return (encoded.len() <= 28 * 1024 * 1024 && base64::engine::general_purpose::STANDARD.decode(encoded).is_ok())
             .then(|| src.to_string());

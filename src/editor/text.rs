@@ -2,6 +2,7 @@
 //! selection, caret and IME marked range. Layout results are written into a
 //! shared cache that the editor uses for hit-testing and caret navigation.
 
+use crate::editor::bidi;
 use crate::editor::core::Pos;
 use crate::editor::math;
 use crate::model::{Align, BlockId, Marks, RichText};
@@ -27,6 +28,8 @@ pub struct Row {
     pub base_dy: Pixels,
     /// x of the row start inside the unwrapped hard-line layout.
     pub x0: Pixels,
+    /// x of the row end there.
+    pub x1: Pixels,
     /// Horizontal offset from alignment.
     pub align_dx: Pixels,
 }
@@ -68,11 +71,57 @@ impl TextLayout {
 
     /// Caret position (top-left of the caret) relative to window.
     pub fn position_for(&self, index: usize) -> Point<Pixels> {
-        let ri = self.row_for(index);
+        self.position_in_row(self.row_for(index), index)
+    }
+
+    /// Caret position at a wrap boundary, drawn at the end of the row above
+    /// instead of the start of the row below.
+    pub fn position_at_row_end(&self, index: usize) -> Point<Pixels> {
+        self.position_in_row(self.row_ending_at(index).unwrap_or_else(|| self.row_for(index)), index)
+    }
+
+    fn position_in_row(&self, ri: usize, index: usize) -> Point<Pixels> {
         let Some(r) = self.rows.get(ri) else { return self.bounds.origin };
-        let (start, line) = &self.lines[r.hard];
-        let x = line.unwrapped_layout.x_for_index(index.saturating_sub(*start)) - r.x0 + r.align_dx;
+        let x = self.x_in_row(r, index) - r.x0 + r.align_dx;
         point(self.bounds.left() + x, self.bounds.top() + r.y + r.base_dy)
+    }
+
+    /// x of the caret before block offset `index` in the hard-line layout of
+    /// row `r`. Right-to-left glyphs come in visual order (see `bidi`).
+    fn x_in_row(&self, r: &Row, index: usize) -> Pixels {
+        let (start, line) = &self.lines[r.hard];
+        let i = index.saturating_sub(*start);
+        let l = &line.unwrapped_layout;
+        if bidi::has_rtl(&line.text) && let Some(x) = bidi::x_for_index(l, &line.text, r.x0..r.x1, i) {
+            return x;
+        }
+        l.x_for_index(i)
+    }
+
+    /// Row `ri` is followed by another row of the same hard line.
+    pub fn row_wraps(&self, ri: usize) -> bool {
+        matches!((self.rows.get(ri), self.rows.get(ri + 1)), (Some(r), Some(n)) if r.hard == n.hard)
+    }
+
+    /// The row that ends at `index`: a wrap boundary is the end of one row and
+    /// the start of the next, so the caret decides which row it is drawn in.
+    fn row_ending_at(&self, index: usize) -> Option<usize> {
+        (0..self.rows.len()).find(|&ri| self.row_wraps(ri) && self.rows[ri].range.end == index)
+    }
+
+    /// Row the caret is drawn in; `at_row_end` when it was placed at the end
+    /// of a wrapped row.
+    pub fn row_index_for_caret(&self, index: usize, at_row_end: bool) -> usize {
+        match at_row_end.then(|| self.row_ending_at(index)).flatten() {
+            Some(ri) => ri,
+            None => self.row_for(index),
+        }
+    }
+
+    /// `index` starts a wrapped row, so the caret may move to the end of the
+    /// row above instead.
+    pub fn starts_row(&self, index: usize) -> bool {
+        (1..self.rows.len()).any(|ri| self.rows[ri].range.start == index && self.rows[ri - 1].hard == self.rows[ri].hard)
     }
 
     /// The equation whose view contains a window-space point.
@@ -92,14 +141,16 @@ impl TextLayout {
         self.buttons.iter().find(|(i, _)| *i == ix).map(|(_, b)| *b)
     }
 
-    pub fn row_index_for(&self, index: usize) -> usize {
-        self.row_for(index)
-    }
-
     /// Closest text index for a window-space point.
     pub fn index_for(&self, p: Point<Pixels>) -> usize {
+        self.caret_for(p).0
+    }
+
+    /// Closest text index for a window-space point, and whether it is the end
+    /// of the row (the caret is drawn there, not at the next row's start).
+    pub fn caret_for(&self, p: Point<Pixels>) -> (usize, bool) {
         if self.rows.is_empty() {
-            return 0;
+            return (0, false);
         }
         let local_y = p.y - self.bounds.top();
         let ri = if local_y < px(0.) {
@@ -110,21 +161,24 @@ impl TextLayout {
                 .position(|r| local_y < r.y + r.h)
                 .unwrap_or(self.rows.len() - 1)
         };
-        self.index_in_row(ri, p.x)
+        self.caret_in_row(ri, p.x)
     }
 
     pub fn index_in_row(&self, ri: usize, window_x: Pixels) -> usize {
+        self.caret_in_row(ri, window_x).0
+    }
+
+    /// Closest text index in row `ri`, and whether it sits at the row's end.
+    /// Both a CJK character and a space wrap at a glyph boundary, so the end
+    /// of a row is a real caret stop of its own.
+    pub fn caret_in_row(&self, ri: usize, window_x: Pixels) -> (usize, bool) {
         let r = &self.rows[ri];
         let (start, line) = &self.lines[r.hard];
         let x = window_x - self.bounds.left() - r.align_dx + r.x0;
-        let ix = start + line.unwrapped_layout.closest_index_for_x(x.max(px(0.)));
-        let last_of_hard = self.rows.get(ri + 1).is_none_or(|n| n.hard != r.hard);
-        let mut ix = ix.clamp(r.range.start, r.range.end);
-        if !last_of_hard && ix == r.range.end && r.range.end > r.range.start {
-            // The wrap boundary belongs to the next row; stay on this one.
-            ix = prev_char(&line.text, ix - start) + start;
-        }
-        ix
+        let l = &line.unwrapped_layout;
+        let rtl = if bidi::has_rtl(&line.text) { bidi::index_for_x(l, &line.text, r.x0..r.x1, x) } else { None };
+        let ix = (start + rtl.unwrap_or_else(|| l.closest_index_for_x(x.max(px(0.))))).clamp(r.range.start, r.range.end);
+        (ix, self.row_wraps(ri) && ix == r.range.end)
     }
 
     /// Rectangles covering `range` (window coords), one per row.
@@ -139,22 +193,69 @@ impl TextLayout {
                 continue;
             }
             let (start, line) = &self.lines[r.hard];
-            let xa = line.unwrapped_layout.x_for_index(a - start) - r.x0 + r.align_dx;
-            let mut xb = line.unwrapped_layout.x_for_index(b - start) - r.x0 + r.align_dx;
+            let top = self.bounds.top() + r.y + r.base_dy;
+            let rect = |xa: Pixels, xb: Pixels| {
+                let (xa, xb) = (xa - r.x0 + r.align_dx, xb - r.x0 + r.align_dx);
+                Bounds::from_corners(point(self.bounds.left() + xa, top), point(self.bounds.left() + xb, top + self.line_height))
+            };
+            // Right-to-left text: the range may cover several pieces of the
+            // row, and the line ends on its left.
+            if bidi::has_rtl(&line.text) {
+                let l = &line.unwrapped_layout;
+                let mut parts = bidi::ranges_for(l, &line.text, r.x0..r.x1, a - start..b - start);
+                if parts.is_empty() {
+                    let x = self.x_in_row(r, a);
+                    parts.push((x, x));
+                }
+                if range.end > r.range.end && last_of_hard {
+                    if bidi::rtl_line(&line.text) {
+                        let first = parts.iter_mut().min_by(|p, q| f32::from(p.0).total_cmp(&f32::from(q.0))).unwrap();
+                        first.0 -= px(5.);
+                    } else {
+                        let last = parts.iter_mut().max_by(|p, q| f32::from(p.1).total_cmp(&f32::from(q.1))).unwrap();
+                        last.1 += px(5.);
+                    }
+                }
+                out.extend(parts.into_iter().map(|(xa, xb)| rect(xa, xb)));
+                continue;
+            }
+            let xa = line.unwrapped_layout.x_for_index(a - start);
+            let mut xb = line.unwrapped_layout.x_for_index(b - start);
             if range.end > r.range.end && last_of_hard {
                 xb += px(5.);
             }
-            out.push(Bounds::from_corners(
-                point(self.bounds.left() + xa, self.bounds.top() + r.y + r.base_dy),
-                point(self.bounds.left() + xb, self.bounds.top() + r.y + r.base_dy + self.line_height),
-            ));
+            out.push(rect(xa, xb));
         }
         out
     }
 }
 
-fn prev_char(s: &str, i: usize) -> usize {
-    s[..i].char_indices().next_back().map(|(k, _)| k).unwrap_or(0)
+/// Each wrapped row's first byte and left x in the hard line's layout. The
+/// leftmost glyph of a right-to-left row is its last character, so there the
+/// row starts at the smallest byte offset drawn in it.
+fn row_starts(line: &WrappedLine) -> Vec<(usize, Pixels)> {
+    let layout = &line.unwrapped_layout;
+    let mut out = vec![(0, px(0.))];
+    for b in line.wrap_boundaries() {
+        let g = &layout.runs[b.run_ix].glyphs[b.glyph_ix];
+        out.push((g.index, g.position.x));
+    }
+    if out.len() > 1 && bidi::has_rtl(&line.text) {
+        let mut wraps = line.wrap_boundaries().iter().peekable();
+        let mut row = 0;
+        for (run_ix, run) in layout.runs.iter().enumerate() {
+            for (glyph_ix, g) in run.glyphs.iter().enumerate() {
+                if wraps.peek().is_some_and(|b| b.run_ix == run_ix && b.glyph_ix == glyph_ix) {
+                    wraps.next();
+                    row += 1;
+                }
+                if row > 0 {
+                    out[row].0 = out[row].0.min(g.index);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A single-line field's horizontal scroll: the caret stays 8pt inside the
@@ -196,7 +297,12 @@ pub struct TextSpec {
     pub font: Option<&'static str>,
     /// Everything italic (a theme's quotes).
     pub italic: bool,
+    /// Fonts by run instead (board text: Excalidraw's fonts, `board::fonts::runs`).
+    pub font_runs: Option<FontRuns>,
 }
+
+/// Cuts a span into runs by font (byte lengths).
+pub type FontRuns = Rc<dyn Fn(&str) -> Vec<(usize, Font)>>;
 
 impl TextSpec {
     /// The page body: 15pt, 1.25 × the natural line height.
@@ -215,6 +321,7 @@ impl TextSpec {
             doc_font: true,
             font: None,
             italic: false,
+            font_runs: None,
         }
     }
 }
@@ -230,6 +337,9 @@ pub struct RichTextElement {
     pub placeholder_dx: f32,
     pub selection: Option<Range<usize>>,
     pub caret: Option<usize>,
+    /// The caret sits at the end of a wrapped row: draw it there rather than
+    /// at the start of the row below (both are the same text offset).
+    pub caret_row_end: bool,
     pub marked: Option<Range<usize>>,
     pub cache: LayoutCache,
     pub show_caret: bool,
@@ -244,6 +354,9 @@ pub struct RichTextElement {
     /// Single-line fields keep their horizontal scroll here, so a long URL
     /// can be read and edited instead of being clipped on the right.
     pub scroll: Option<Rc<Cell<Pixels>>>,
+    /// Unwrapped text as wide as its longest line (at least the parent), for
+    /// a scroller around it: a code block that doesn't wrap (#161).
+    pub fit_content: bool,
 }
 
 pub struct Prepared {
@@ -253,6 +366,8 @@ pub struct Prepared {
     /// (height, base_dy) of every row, in order.
     rows: Vec<(Pixels, Pixels)>,
     height: Pixels,
+    /// The longest line, the width of a `fit_content` element.
+    width: Pixels,
     eqs: Vec<Rc<EqGeom>>,
 }
 
@@ -324,7 +439,7 @@ fn doc_geom(ix: usize, l: &crate::model::InlineDocLink, spec: &TextSpec, row_w: 
         None => (crate::settings::text("此文档已被删除").to_string(), None),
     };
     let font = Font {
-        family: theme::UI_FONT.into(),
+        family: theme::DOC_UI_FONT.into(),
         features: FontFeatures::default(),
         fallbacks: Some(FontFallbacks::from_fonts(vec!["PingFang SC".into(), "Apple Color Emoji".into()])),
         weight: if spec.weight.0 > 500. { spec.weight } else { FontWeight(500.) },
@@ -339,7 +454,9 @@ fn doc_geom(ix: usize, l: &crate::model::InlineDocLink, spec: &TextSpec, row_w: 
         window.text_system().shape_line(e.into(), px(fs), &[run], None)
     });
     let s = fs.round();
-    let text_x = 2. + s + 2.;
+    // An emoji can be wider than the em box (Segoe UI Emoji on Windows): keep the title clear of it.
+    let iw = emoji.as_ref().map_or(s, |e| f32::from(e.width).max(s));
+    let text_x = 2. + iw + 2.;
     let w = (text_x + f32::from(line.width) + 2.).min(row_w.max(text_x + 2.));
     EqGeom {
         ix,
@@ -359,7 +476,7 @@ fn doc_geom(ix: usize, l: &crate::model::InlineDocLink, spec: &TextSpec, row_w: 
 fn reminder_geom(ix: usize, r: &crate::model::InlineReminder, spec: &TextSpec, window: &mut Window) -> EqGeom {
     let (fs, lh) = (spec.size, spec.line_height);
     let font = Font {
-        family: theme::UI_FONT.into(),
+        family: theme::DOC_UI_FONT.into(),
         features: FontFeatures::default(),
         fallbacks: Some(FontFallbacks::from_fonts(vec!["PingFang SC".into(), "Apple Color Emoji".into()])),
         weight: spec.weight,
@@ -394,7 +511,7 @@ fn reminder_geom(ix: usize, r: &crate::model::InlineReminder, spec: &TextSpec, w
 fn file_geom(ix: usize, f: &crate::model::FileBlock, spec: &TextSpec, row_w: f32, window: &mut Window) -> EqGeom {
     let (fs, lh) = (spec.size, spec.line_height);
     let font = Font {
-        family: theme::UI_FONT.into(),
+        family: theme::DOC_UI_FONT.into(),
         features: FontFeatures::default(),
         fallbacks: Some(FontFallbacks::from_fonts(vec!["PingFang SC".into(), "Apple Color Emoji".into()])),
         weight: spec.weight,
@@ -425,7 +542,7 @@ fn button_geom(ix: usize, b: &crate::model::InlineButton, editing: bool, spec: &
     let lh = spec.line_height;
     let wrap_lh = if heading { bh } else { lh };
     let font = Font {
-        family: theme::UI_FONT.into(),
+        family: theme::DOC_UI_FONT.into(),
         features: FontFeatures::default(),
         fallbacks: Some(FontFallbacks::from_fonts(vec!["PingFang SC".into(), "Apple Color Emoji".into()])),
         weight,
@@ -468,7 +585,7 @@ fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, wi
         let error = parsed.is_some();
         let (label, tc) = if error { (crate::settings::text("无效公式"), Theme::text()) } else { (crate::settings::text("添加 LaTeX 公式"), Theme::text_caption()) };
         let font = Font {
-            family: theme::UI_FONT.into(),
+            family: theme::DOC_UI_FONT.into(),
             features: FontFeatures::default(),
             fallbacks: Some(FontFallbacks::from_fonts(vec!["PingFang SC".into()])),
             weight: FontWeight::NORMAL,
@@ -562,7 +679,7 @@ fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, wi
 }
 
 fn font_for(spec: &TextSpec, m: &Marks) -> Font {
-    let family: SharedString = if spec.mono || m.code { crate::media_theme::mono_font().into() } else if let Some(f) = spec.font { f.into() } else if spec.doc_font { theme::body_font().into() } else { theme::UI_FONT.into() };
+    let family: SharedString = if spec.mono || m.code { crate::media_theme::mono_font().into() } else if let Some(f) = spec.font { f.into() } else if spec.doc_font { theme::body_font().into() } else { theme::ui_family().into() };
     Font {
         family,
         features: FontFeatures::default(),
@@ -595,7 +712,10 @@ fn span_color(spec: &TextSpec, m: &Marks) -> Hsla {
 
 use crate::editor_ui::{CJK_PUNCT_FONT, is_cjk_punct};
 
+#[cfg(not(target_family = "wasm"))]
 const QUOTE_FONT: &str = "Helvetica Neue";
+#[cfg(target_family = "wasm")]
+const QUOTE_FONT: &str = crate::theme::SYSTEM_FONT;
 
 /// Shaped in place of an equation's U+FFFC: same UTF-8 length, a glyph of
 /// the text font (so the line's ascent is unchanged).
@@ -680,9 +800,11 @@ pub fn build_runs(
             };
             let mut font = font_for(spec, m);
             if !spec.mono && !m.code {
+                // A family the reader picked keeps the ones it draws itself.
+                let own = crate::fonts::own_glyphs(&font.family);
                 if text.text[a..b].chars().all(is_quote) {
-                    font.family = QUOTE_FONT.into();
-                } else if text.text[a..b].chars().all(is_cjk_punct) {
+                    if !own.quotes { font.family = QUOTE_FONT.into(); }
+                } else if !own.cjk_punct && text.text[a..b].chars().all(is_cjk_punct) {
                     font.family = CJK_PUNCT_FONT.into();
                 }
             }
@@ -693,25 +815,21 @@ pub fn build_runs(
                 font.weight = if m.bold { bold_weight() } else { FontWeight::NORMAL };
             }
             let background_color = m.bg_color.as_ref().and_then(|c| theme::bg_color(&c.0)).map(|c| if spec.dim_marks { c.opacity(0.7) } else { c });
-            runs.push(TextRun {
-                len: b - a,
-                font,
-                color: if background_color.is_some() { crate::theme::on_mark(color) } else { color },
-                background_color,
-                underline,
-                // Painted by `RichTextElement::paint`, see `paint_strikes`.
-                strikethrough: None,
-            });
+            let fonts = match &spec.font_runs { Some(f) => f(&text.text[a..b]), None => vec![(b - a, font)] };
+            for (len, font) in fonts {
+                runs.push(TextRun {
+                    len,
+                    font,
+                    color: if background_color.is_some() { crate::theme::on_mark(color) } else { color },
+                    background_color,
+                    underline,
+                    // Painted by `RichTextElement::paint`, see `paint_strikes`.
+                    strikethrough: None,
+                });
+            }
         }
     }
     runs
-}
-
-impl IntoElement for RichTextElement {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
 }
 
 impl Element for RichTextElement {
@@ -812,7 +930,8 @@ impl Element for RichTextElement {
         let eq_counter = self.eq_counter;
         let spec = self.spec.clone();
         let mut style = Style::default();
-        style.size.width = relative(1.).into();
+        let fit = self.fit_content && !wrap;
+        if fit { style.min_size.width = relative(1.).into(); style.flex_shrink = 0.; } else { style.size.width = relative(1.).into() }
         let st = state.clone();
         let layout_id = window.request_measured_layout(style, move |known, available, window, _cx| {
             let wrap_width = if wrap {
@@ -826,7 +945,7 @@ impl Element for RichTextElement {
             if let Some(p) = st.borrow().as_ref()
                 && p.wrap_width == wrap_width
             {
-                return size(known.width.unwrap_or(px(0.)), p.height);
+                return size(known.width.unwrap_or(if fit { p.width } else { px(0.) }), p.height);
             }
             let custom = spacing != px(0.) || !eq_src.is_empty();
             let mut lines = window
@@ -870,10 +989,7 @@ impl Element for RichTextElement {
                 // Row heights: the line box grows to contain equation boxes.
                 let layout = &l.unwrapped_layout;
                 let base = (line_height - layout.ascent - layout.descent) / 2. + layout.ascent;
-                let mut cuts: Vec<usize> = vec![0];
-                for b in l.wrap_boundaries() {
-                    cuts.push(layout.runs[b.run_ix].glyphs[b.glyph_ix].index);
-                }
+                let mut cuts: Vec<usize> = row_starts(&l).into_iter().map(|r| r.0).collect();
                 cuts.push(len + 1);
                 for c in cuts.windows(2) {
                     let (mut top, mut bottom) = (px(0.), line_height);
@@ -897,7 +1013,7 @@ impl Element for RichTextElement {
             if out.is_empty() {
                 h = line_height;
             }
-            *st.borrow_mut() = Some(Prepared { lines: out, wrap_width, line_height, rows, height: h, eqs });
+            *st.borrow_mut() = Some(Prepared { lines: out, wrap_width, line_height, rows, height: h, width: w, eqs });
             size(known.width.unwrap_or(w), h)
         });
         (layout_id, state)
@@ -917,7 +1033,10 @@ impl Element for RichTextElement {
         let sx = match &self.scroll {
             Some(cell) if !self.spec.wrap && p.lines.len() == 1 => {
                 let (start, line) = &p.lines[0];
-                let caret_x = line.unwrapped_layout.x_for_index(self.caret.unwrap_or(0).saturating_sub(*start));
+                let i = self.caret.unwrap_or(0).saturating_sub(*start);
+                let l = &line.unwrapped_layout;
+                let rtl = if bidi::has_rtl(&line.text) { bidi::x_for_index(l, &line.text, px(0.)..l.width, i) } else { None };
+                let caret_x = rtl.unwrap_or_else(|| l.x_for_index(i));
                 let s = hscroll(line.unwrapped_layout.width, caret_x, bounds.size.width, cell.get());
                 cell.set(s);
                 s
@@ -938,24 +1057,23 @@ impl Element for RichTextElement {
         let mut heights = p.rows.iter();
         for (hi, (start, line)) in p.lines.iter().enumerate() {
             let layout = &line.unwrapped_layout;
-            let mut bounds_ix: Vec<(usize, Pixels)> = vec![(0, px(0.))];
-            for b in line.wrap_boundaries() {
-                let g = &layout.runs[b.run_ix].glyphs[b.glyph_ix];
-                bounds_ix.push((g.index, g.position.x));
-            }
+            let mut bounds_ix = row_starts(line);
             bounds_ix.push((line.len(), layout.width));
+            // A line that reads right to left keeps the default (left)
+            // alignment against the right edge, as the platform text views do.
+            let align = if self.align == Align::Left && bidi::rtl_line(&line.text) { Align::Right } else { self.align };
             for w in bounds_ix.windows(2) {
                 let (a, xa) = w[0];
                 let (b, xb) = w[1];
                 let width = xb - xa;
-                let align_dx = match self.align {
+                let align_dx = match align {
                     Align::Left => px(0.),
                     Align::Center => ((bounds.size.width - width) / 2.).max(px(0.)),
                     Align::Right => (bounds.size.width - width).max(px(0.)),
                 };
                 let (ra, rb) = if showing_placeholder { (0, 0) } else { (start + a, start + b) };
                 let (h, base_dy) = heights.next().copied().unwrap_or((lh, px(0.)));
-                rows.push(Row { range: ra..rb, hard: hi, y, h, base_dy, x0: xa, align_dx });
+                rows.push(Row { range: ra..rb, hard: hi, y, h, base_dy, x0: xa, x1: xb, align_dx });
                 y += h;
             }
         }
@@ -964,9 +1082,8 @@ impl Element for RichTextElement {
         for e in p.eqs {
             let ri = layout.row_for(e.ix);
             let Some(r) = layout.rows.get(ri) else { continue };
-            let (start, line) = &layout.lines[r.hard];
-            let l = &line.unwrapped_layout;
-            let x = l.x_for_index(e.ix - start) - r.x0 + r.align_dx;
+            let l = &layout.lines[r.hard].1.unwrapped_layout;
+            let x = layout.x_in_row(r, e.ix) - r.x0 + r.align_dx;
             let base = (lh - l.ascent - l.descent) / 2. + l.ascent;
             let line_top = bounds.top() + r.y + r.base_dy;
             let origin = point(text_origin.x + x, if e.ext.is_some() { line_top } else { line_top + base - px(EQ_MIDDLE * self.spec.size) });
@@ -997,7 +1114,10 @@ impl Element for RichTextElement {
         let cache = self.cache.borrow();
         let Some(layout) = cache.get(&self.id) else { return };
         let lh = layout.line_height;
-        let gpui_align = match self.align {
+        // Per hard line: one that reads right to left sits against the right
+        // edge (see `prepaint`).
+        let gpui_align = |line: &WrappedLine| match self.align {
+            Align::Left if bidi::rtl_line(&line.text) => TextAlign::Right,
             Align::Left => TextAlign::Left,
             Align::Center => TextAlign::Center,
             Align::Right => TextAlign::Right,
@@ -1028,7 +1148,7 @@ impl Element for RichTextElement {
         let o = point(bounds.left() + dx - sx, bounds.top());
         for (hi, (_, line)) in layout.lines.iter().enumerate() {
             let tops: Vec<Pixels> = layout.rows.iter().filter(|r| r.hard == hi).map(|r| r.y + r.base_dy).collect();
-            let _ = line.paint_background_rows(o, lh, &tops, gpui_align, Some(bounds), window, cx);
+            let _ = line.paint_background_rows(o, lh, &tops, gpui_align(line), Some(bounds), window, cx);
         }
         if let Some(sel) = &self.selection {
             let rects = if self.text.is_empty() {
@@ -1078,7 +1198,7 @@ impl Element for RichTextElement {
         }
         for (hi, (_, line)) in layout.lines.iter().enumerate() {
             let tops: Vec<Pixels> = layout.rows.iter().filter(|r| r.hard == hi).map(|r| r.y + r.base_dy).collect();
-            let _ = line.paint_rows(o, lh, &tops, gpui_align, Some(bounds), window, cx);
+            let _ = line.paint_rows(o, lh, &tops, gpui_align(line), Some(bounds), window, cx);
         }
         for eq in prepaint.placed.iter() {
             let o = eq.origin;
@@ -1095,12 +1215,13 @@ impl Element for RichTextElement {
                 EqBody::Reminder { .. } => self.paint_reminder(eq, window, cx),
                 EqBody::Text { line, at, icon } => {
                     let top = o.y + px(at[1]) - line.ascent;
-                    let _ = line.paint(point(o.x + px(at[0]), top), line.ascent + line.descent, window, cx);
+                    let _ = line.paint(point(o.x + px(at[0]), top), line.ascent + line.descent, TextAlign::Left, None, window, cx);
                     if let Some(i) = icon {
                         let b = Bounds::new(point(o.x + px(i[0]), o.y + px(i[1])), size(px(14.), px(14.)));
                         let _ = window.paint_svg(
                             b,
                             "editor-icons/equation-error.svg".into(),
+                            None,
                             TransformationMatrix::unit(),
                             theme::c(0xff9200),
                             cx,
@@ -1133,6 +1254,8 @@ impl Element for RichTextElement {
                     Align::Right => bounds.size.width - px(2.),
                 };
                 point(bounds.left() + dx, bounds.top())
+            } else if self.caret_row_end {
+                layout.position_at_row_end(c)
             } else {
                 layout.position_for(c)
             };
@@ -1169,7 +1292,7 @@ impl RichTextElement {
         let shadows = if lifted { crate::editor::button::shadow_s4() } else { crate::editor::button::shadow_s1() };
         // Content stays crisp: buttons in the text round at 5.
         let radius = px(5.);
-        window.paint_shadows(v, Corners::all(radius), &shadows);
+        window.paint_drop_shadows(v, Corners::all(radius), &shadows);
         window.paint_quad(fill(v, bg).corner_radii(radius));
         // A done to-do: `.todo-line-through .docx-button-component` draws
         // a 1.6px `--icon-n2` line at 55% behind the label; `opacity: .7`.
@@ -1182,7 +1305,7 @@ impl RichTextElement {
         let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
         let clip = Bounds::new(point(v.left() + px(*pad), v.top()), size((v.size.width - px(pad * 2.)).max(px(0.)), v.size.height));
         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-            let _ = line.paint(point(v.left() + px(*pad), v.top()), px(*bh), window, cx);
+            let _ = line.paint(point(v.left() + px(*pad), v.top()), px(*bh), TextAlign::Left, None, window, cx);
         });
     }
 
@@ -1201,7 +1324,7 @@ impl RichTextElement {
         let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
         let clip = Bounds::new(point(o.x + px(*text_x), v.top()), size((v.size.width - px(text_x + 2.)).max(px(0.)), v.size.height));
         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, window, cx);
+            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, TextAlign::Left, None, window, cx);
         });
     }
 
@@ -1220,12 +1343,12 @@ impl RichTextElement {
         let ib = Bounds::new(point(o.x + px(icon[0]), o.y + px(icon[1])), size(px(icon[2]), px(icon[2])));
         match emoji {
             Some(e) => {
-                let _ = e.paint(point(ib.origin.x, v.top()), v.size.height, window, cx);
+                let _ = e.paint(point(ib.origin.x, v.top()), v.size.height, TextAlign::Left, None, window, cx);
             }
             None => {
                 let c = if *deleted { Theme::text_disabled() } else { Theme::primary_500() };
-                let _ = window.paint_svg(ib, "editor-icons/doc-blue.svg".into(), TransformationMatrix::unit(), c, cx);
-                let _ = window.paint_svg(ib, "editor-icons/doc-blue-lines.svg".into(), TransformationMatrix::unit(), Theme::bg_body(), cx);
+                let _ = window.paint_svg(ib, "editor-icons/doc-blue.svg".into(), None, TransformationMatrix::unit(), c, cx);
+                let _ = window.paint_svg(ib, "editor-icons/doc-blue-lines.svg".into(), None, TransformationMatrix::unit(), Theme::bg_body(), cx);
             }
         }
         let color = if *deleted { Theme::text_disabled() } else if hovered { Theme::link_hover() } else { Theme::link() };
@@ -1233,7 +1356,7 @@ impl RichTextElement {
         let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
         let clip = Bounds::new(point(o.x + px(*text_x), v.top()), size((v.size.width - px(text_x + 2.)).max(px(0.)), v.size.height));
         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, window, cx);
+            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, TextAlign::Left, None, window, cx);
         });
     }
 
@@ -1247,9 +1370,9 @@ impl RichTextElement {
         let o = eq.origin;
         let ib = Bounds::new(point(o.x + px(icon[0]), o.y + px(icon[1])), size(px(icon[2]), px(icon[2])));
         let path = if *filled { "editor-icons/reminder-filled.svg" } else { "editor-icons/reminder.svg" };
-        let _ = window.paint_svg(ib, path.into(), TransformationMatrix::unit(), *icon_color, cx);
+        let _ = window.paint_svg(ib, path.into(), None, TransformationMatrix::unit(), *icon_color, cx);
         let lh = px(self.spec.line_height);
-        let _ = line.paint(point(o.x + px(*text_x), o.y), lh, window, cx);
+        let _ = line.paint(point(o.x + px(*text_x), o.y), lh, TextAlign::Left, None, window, cx);
     }
 
     /// Pointer cursor, hover and `:active` repaints for equation views.
@@ -1366,7 +1489,18 @@ fn adjust_line(line: &mut WrappedLine, ls: Pixels, eqs: &[&EqGeom], start: usize
 }
 
 fn is_cjk(ch: char) -> bool {
-    ('\u{2E80}'..='\u{9FFF}').contains(&ch) || ('\u{AC00}'..='\u{D7AF}').contains(&ch) || ('\u{F900}'..='\u{FFEF}').contains(&ch)
+    (('\u{2E80}'..='\u{9FFF}').contains(&ch) || ('\u{F900}'..='\u{FFEF}').contains(&ch)) && !is_hangul(ch)
+}
+
+/// Korean puts spaces between words, so Hangul wraps by word (어절) like Latin.
+fn is_hangul(ch: char) -> bool {
+    matches!(ch, '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7FF}' | '\u{FFA0}'..='\u{FFDC}')
+}
+
+/// A line may break before `ch`: after a space, or next to CJK ideographs
+/// and kana, keeping closing punctuation with what precedes it.
+fn can_break(prev: char, ch: char) -> bool {
+    if ch.is_whitespace() { false } else if prev.is_whitespace() { true } else { (is_cjk(ch) || is_cjk(prev)) && !no_break_before(ch) && !no_break_after(prev) }
 }
 
 fn no_break_before(ch: char) -> bool {
@@ -1406,12 +1540,8 @@ pub(crate) fn wrap_spaced(text: &str, layout: &LineLayout, width: Pixels, eqs: &
             }
             let breakable = if eq_here.is_some() || eq_prev.is_some() {
                 !ch.is_whitespace() && !no_break_before(ch)
-            } else if ch.is_whitespace() {
-                false
-            } else if prev.is_whitespace() {
-                true
             } else {
-                (is_cjk(ch) || is_cjk(prev)) && !no_break_before(ch) && !no_break_after(prev)
+                can_break(prev, ch)
             };
             if breakable {
                 last_break = Some(k);
@@ -1429,7 +1559,7 @@ pub(crate) fn wrap_spaced(text: &str, layout: &LineLayout, width: Pixels, eqs: &
 }
 
 /// Pos helper for callers that hit-test across blocks.
-pub fn hit_test(cache: &LayoutCache, p: Point<Pixels>, candidates: &[BlockId]) -> Option<Pos> {
+pub fn hit_test(cache: &LayoutCache, p: Point<Pixels>, candidates: &[BlockId]) -> Option<(Pos, bool)> {
     let cache = cache.borrow();
     let mut best: Option<(f32, f32, BlockId)> = None;
     for id in candidates {
@@ -1459,7 +1589,28 @@ pub fn hit_test(cache: &LayoutCache, p: Point<Pixels>, candidates: &[BlockId]) -
     }
     let (_, _, id) = best?;
     let l = cache.get(&id)?;
-    Some(Pos::new(id, l.index_for(p)))
+    let (offset, at_row_end) = l.caret_for(p);
+    Some((Pos::new(id, offset), at_row_end))
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::can_break;
+
+    fn breaks(text: &str) -> Vec<usize> {
+        let chars: Vec<char> = text.chars().collect();
+        (1..chars.len()).filter(|&i| can_break(chars[i - 1], chars[i])).collect()
+    }
+
+    #[test]
+    fn hangul_wraps_by_word_and_chinese_by_character() {
+        assert_eq!(breaks("한국어 문서를 편집합니다"), [4, 8], "only where a word starts");
+        assert_eq!(breaks("Quiet.md를 써요"), [10], "a particle stays on its word");
+        assert_eq!(breaks("ㅋㅋㅋ 좋아요"), [4]);
+        assert_eq!(breaks("你好世界"), [1, 2, 3]);
+        assert_eq!(breaks("中文。한국어"), [1, 3], "Chinese still breaks, but not before closing punctuation");
+        assert_eq!(breaks("Hello world"), [6]);
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -1467,9 +1618,29 @@ mod tests {
     /// Editor text shapes CJK through CoreText's PingFang fallback, while CJK
     /// punctuation loads the PingFang SC family (`CJK_PUNCT_FONT`): both must
     /// keep drawing the right glyphs.
+    ///
+    /// CoreText's fallback copy of PingFang SC shares its PostScript name with
+    /// the PingFang SC family but not its glyph table (vendor patch
+    /// fallback-font-identity). Shapes the text in the system font before and
+    /// after loading that family, and checks every glyph against its face.
     #[test]
     fn cjk_fallback_glyphs() {
-        gpui::check_fallback_glyphs("周末规划一背景本季度目标").unwrap();
+        use gpui::{FontFallbacks, FontRun, PlatformTextSystem, px};
+        let text = "周末规划一背景本季度目标";
+        let fonts = gpui_apple::AppleTextSystem::new();
+        let mut ui = gpui::font(".SystemUIFont");
+        ui.fallbacks = Some(FontFallbacks::from_fonts(vec!["PingFang SC".into()]));
+        let font_id = fonts.font_id(&ui).unwrap();
+        for pass in 0..2 {
+            if pass == 1 { fonts.font_id(&gpui::font("PingFang SC")).unwrap(); }
+            let layout = fonts.layout_line(text, px(16.), &[FontRun { font_id, len: text.len() }]);
+            for run in &layout.runs {
+                for g in &run.glyphs {
+                    let ch = text[g.index..].chars().next().unwrap_or_default();
+                    assert_eq!(fonts.glyph_for_char(run.font_id, ch), Some(g.id), "{ch:?} drawn from the wrong face (pass {pass})");
+                }
+            }
+        }
     }
 
     #[test]

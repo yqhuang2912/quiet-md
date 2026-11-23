@@ -10,12 +10,27 @@
 //! for this process to exit, then swaps the bundle (macOS) or runs the Inno
 //! installer silently (Windows), or replaces the AppImage (Linux), then restarts.
 //!
+//! The manifest itself is not signed, so what it may say is narrowed (#41): the
+//! package must come from download.quiet.md over HTTPS (redirects included), and
+//! its signature's trusted comment must name that package, version and all.
+//!
+//! 强制更新 (docs/UPDATES.md): `latest/policy.json`, signed with the same key,
+//! may say this version is too old (`min_version`, per platform if need be).
+//! It is read at launch and hourly whether or not 自动检查更新 is on; when it
+//! applies, the newest package downloads at once (same verification) and a
+//! dialog that cannot be dismissed offers 立即重启更新. Until the package is
+//! there (offline, a failed download) only a banner shows and the notes stay
+//! usable; it retries every few minutes. A policy that fails verification,
+//! asks for no newer version, or names a version the manifest does not offer
+//! yet forces nothing. Copies before this one never read the file.
+//!
 //! `QUIET_MD_UPDATE_URL` points the check at another folder (testing; it also
-//! enables the check in unsigned builds). The public key can be replaced at
+//! enables the check in unsigned builds, and allows http and any host). The public key can be replaced at
 //! build time with `QUIET_MD_UPDATE_PUBKEY`.
 
-use gpui::*;
+use gpui::{prelude::FluentBuilder, *};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -55,8 +70,9 @@ pub enum State {
     Failed(String),
 }
 
-/// `last`: when the latest automatic check started.
-pub struct Updater { pub state: State, told: Option<String>, last: Option<std::time::Instant> }
+/// `last`: when the latest automatic check started. `forced`: what the
+/// signed policy requires of this copy; `policy_last` / `policy_busy`: its check.
+pub struct Updater { pub state: State, told: Option<String>, last: Option<web_time::Instant>, forced: Option<Forced>, policy_last: Option<web_time::Instant>, policy_busy: bool }
 impl Global for Updater {}
 
 pub fn state(cx: &App) -> State { cx.try_global::<Updater>().map_or(State::Idle, |u| u.state.clone()) }
@@ -68,12 +84,20 @@ fn set(state: State, cx: &mut App) {
 
 /// Starts the periodic check.
 pub fn init(cx: &mut App) {
-    cx.set_global(Updater { state: State::Idle, told: None, last: None });
+    cx.set_global(Updater { state: State::Idle, told: None, last: None, forced: None, policy_last: None, policy_busy: false });
     cx.spawn(async |cx| {
         cx.background_executor().timer(Duration::from_secs(10)).await;
         loop {
-            if cx.update(|cx| if crate::settings::prefs().auto_update { check(false, cx) }).is_err() { break }
+            cx.update(|cx| if crate::settings::prefs().auto_update { check(false, cx) });
             cx.background_executor().timer(Duration::from_secs(12 * 3600)).await;
+        }
+    }).detach();
+    // The policy, regardless of 自动检查更新: soon after launch, then whenever it is due.
+    cx.spawn(async |cx| {
+        cx.background_executor().timer(Duration::from_secs(3)).await;
+        loop {
+            cx.update(|cx| if policy_due(cx) { check_policy(cx) });
+            cx.background_executor().timer(Duration::from_secs(60)).await;
         }
     }).detach();
 }
@@ -97,11 +121,11 @@ pub fn check(manual: bool, cx: &mut App) {
         State::Unsupported if !manual => return,
         _ => {}
     }
-    if manual { set(State::Checking, cx); } else { cx.global_mut::<Updater>().last = Some(std::time::Instant::now()); }
+    if manual { set(State::Checking, cx); } else { cx.global_mut::<Updater>().last = Some(web_time::Instant::now()); }
     let task = cx.background_executor().spawn(async { fetch_manifest() });
     cx.spawn(async move |cx| {
         let result = task.await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let state = match result {
                 Ok(Some(m)) => State::Available(m),
                 Ok(None) => State::Current,
@@ -142,12 +166,12 @@ pub fn download(cx: &mut App) {
     // Redraw the progress (read off the partial file) while the download runs.
     cx.spawn(async |cx| loop {
         cx.background_executor().timer(Duration::from_millis(300)).await;
-        if !cx.update(|cx| if matches!(state(cx), State::Downloading(_)) { cx.refresh_windows(); true } else { false }).unwrap_or(false) { break }
+        if !cx.update(|cx| if matches!(state(cx), State::Downloading(_)) { cx.refresh_windows(); true } else { false }) { break }
     }).detach();
     let task = cx.background_executor().spawn({ let m = m.clone(); async move { fetch_package(&m) } });
     cx.spawn(async move |cx| {
         let result = task.await;
-        let _ = cx.update(|cx| set(match result { Ok(path) => State::Ready(m, path), Err(e) => State::DownloadFailed(m, e) }, cx));
+        cx.update(|cx| set(match result { Ok(path) => State::Ready(m, path), Err(e) => State::DownloadFailed(m, e) }, cx));
     }).detach();
 }
 
@@ -158,8 +182,224 @@ pub fn install(cx: &mut App) {
     match start_installer(&path) {
         // After the click's window update: the quit asks every window to save.
         Ok(()) => { set(State::Installing(m), cx); cx.defer(crate::app::quit); }
+        // A required update keeps its package and says why in the banner
+        // (the dialog would otherwise come straight back, blocking the notes).
+        Err(e) if cx.global::<Updater>().forced.is_some() => {
+            if let Some(f) = cx.global_mut::<Updater>().forced.as_mut() { f.error = Some(e) }
+            cx.refresh_windows();
+        }
         Err(e) => set(State::Failed(e), cx),
     }
+}
+
+// ---- 强制更新
+
+/// `latest/policy.json`: the policy text exactly as signed, and the `.minisig`
+/// text whose trusted comment is [`policy_comment`] of it.
+#[derive(Deserialize)]
+struct SignedPolicy { policy: String, signature: String }
+
+/// What the signed text says. Unknown fields are ignored, missing ones empty,
+/// so later policies can say more without breaking this reader.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Policy {
+    /// Copies older than this must update; empty: none must.
+    pub min_version: String,
+    /// In place of `min_version` for a platform (`macos-arm64`, `windows-x64`, …).
+    pub platforms: HashMap<String, String>,
+    pub message_zh: String,
+    pub message_en: String,
+}
+
+/// A required update this copy has learnt of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Forced {
+    /// The lowest acceptable version.
+    pub min: String,
+    message_zh: String,
+    message_en: String,
+    /// Why 立即重启更新 failed (a read-only Applications folder…): the banner says so.
+    pub error: Option<String>,
+}
+
+impl Forced {
+    /// The policy's note in the interface language (Chinese for both Chinese
+    /// interfaces, English otherwise), or the other one when that is empty.
+    pub fn message(&self) -> Option<&str> {
+        use crate::settings::Lang;
+        let zh = matches!(crate::settings::lang(), Lang::Zh | Lang::ZhTw);
+        let (a, b) = if zh { (&self.message_zh, &self.message_en) } else { (&self.message_en, &self.message_zh) };
+        [a, b].into_iter().map(|s| s.trim()).find(|s| !s.is_empty())
+    }
+}
+
+pub fn forced(cx: &App) -> Option<Forced> { cx.try_global::<Updater>().and_then(|u| u.forced.clone()) }
+
+/// The dialog that cannot be dismissed is up: the package is verified and
+/// waits. Keys stay out of the window beneath it.
+pub fn blocking(cx: &App) -> bool {
+    let Some(u) = cx.try_global::<Updater>() else { return false };
+    u.forced.as_ref().is_some_and(|f| f.error.is_none() && matches!(&u.state, State::Ready(m, _) if !newer(&f.min, &m.version)))
+}
+
+/// How often the policy is read: hourly, or every few minutes while a
+/// required update could not be fetched yet (offline, a failed download).
+const POLICY_EVERY: Duration = Duration::from_secs(3600);
+const POLICY_RETRY: Duration = Duration::from_secs(600);
+
+fn policy_due(cx: &App) -> bool {
+    let Some(u) = cx.try_global::<Updater>() else { return false };
+    let waiting = u.forced.is_some() && !matches!(u.state, State::Downloading(_) | State::Ready(..) | State::Installing(_));
+    !u.policy_busy && u.policy_last.is_none_or(|t| t.elapsed() >= if waiting { POLICY_RETRY } else { POLICY_EVERY })
+}
+
+/// 重试 in the banner: read the policy again now.
+pub fn retry_forced(cx: &mut App) {
+    if let State::Ready(..) = state(cx) { return install(cx) }
+    if cx.try_global::<Updater>().is_some_and(|u| !u.policy_busy) { check_policy(cx) }
+}
+
+/// What the server says this copy must do.
+enum Required {
+    None,
+    /// Update to at least `min`; `manifest`: the newest package, when it could be read.
+    Update { min: String, policy: Policy, manifest: Option<Manifest> },
+}
+
+/// Reads the policy and, when it applies, starts on the required update.
+fn check_policy(cx: &mut App) {
+    { let u = cx.global_mut::<Updater>(); u.policy_busy = true; u.policy_last = Some(web_time::Instant::now()); }
+    let task = cx.background_executor().spawn(async { fetch_required() });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            cx.global_mut::<Updater>().policy_busy = false;
+            match result {
+                Ok(Required::None) => { if cx.global_mut::<Updater>().forced.take().is_some() { cx.refresh_windows(); } }
+                Ok(Required::Update { min, policy, manifest }) => {
+                    let error = cx.global::<Updater>().forced.as_ref().filter(|f| f.min == min).and_then(|f| f.error.clone());
+                    cx.global_mut::<Updater>().forced = Some(Forced { min: min.clone(), message_zh: policy.message_zh, message_en: policy.message_en, error });
+                    let start = match state(cx) {
+                        State::Downloading(_) | State::Installing(_) => false,
+                        // Already downloaded, unless it is a version the policy no longer accepts.
+                        State::Ready(m, _) => newer(&min, &m.version),
+                        _ => true,
+                    };
+                    if let (true, Some(m)) = (start, manifest) {
+                        set(State::Available(m), cx);
+                        download(cx);
+                    }
+                    cx.refresh_windows();
+                }
+                // Not this copy's business (a development build…), or offline:
+                // whatever was known stays, and the next check retries.
+                Err(_) => {}
+            }
+        });
+    }).detach();
+}
+
+fn policy_comment(policy: &str) -> String {
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(policy.as_bytes());
+    format!("quiet-md-policy sha256:{}", hash.iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// `bytes` (a `policy.json`) carry a policy signed by `key` whose trusted
+/// comment names that very text by hash: a package's signature cannot pass
+/// for a policy, nor a policy's for a package.
+fn verify_policy(bytes: &[u8], key: &minisign_verify::PublicKey) -> Option<Policy> {
+    let signed: SignedPolicy = serde_json::from_slice(bytes).ok()?;
+    let sig = minisign_verify::Signature::decode(&signed.signature).ok()?;
+    if sig.trusted_comment() != policy_comment(&signed.policy) || key.verify(signed.policy.as_bytes(), &sig, false).is_err() { return None }
+    serde_json::from_str(&signed.policy).ok()
+}
+
+/// The version `platform` must reach when it runs `current`, if any: never
+/// one that is not newer (no downgrades), never a malformed one.
+fn required_version(policy: &Policy, platform: &str, current: &str) -> Option<String> {
+    let min = policy.platforms.get(platform).unwrap_or(&policy.min_version).trim();
+    let valid = !min.is_empty() && min.split('.').all(|p| p.parse::<u64>().is_ok());
+    (valid && newer(min, current)).then(|| min.to_string())
+}
+
+/// The newest version on offer satisfies `min`; else the policy is a mistake
+/// (published before the packages) and forces nothing.
+fn offers(manifest: &Manifest, min: &str) -> bool { !newer(min, &manifest.version) }
+
+/// The last policy that verified, for a launch without a connection.
+fn policy_cache() -> PathBuf { updates_dir().with_file_name("policy.json") }
+
+fn fetch_required() -> Result<Required, Error> {
+    if !supported() { return Err(Error::Unsupported) }
+    let platform = platform().unwrap();
+    let key = public_key().ok_or(Error::Unsupported)?;
+    let base = override_url().unwrap_or_else(|| BASE.into());
+    let policy = match curl_manifest(&format!("{}/policy.json", base.trim_end_matches('/')), override_url().is_some()) {
+        Ok(Some(bytes)) => {
+            let policy = verify_policy(&bytes, &key);
+            if policy.is_some() && let Some(dir) = policy_cache().parent() { let _ = std::fs::create_dir_all(dir); let _ = std::fs::write(policy_cache(), &bytes); }
+            else { crate::logging::write("update policy: not signed by the release key; ignored"); }
+            policy
+        }
+        Ok(None) => { let _ = std::fs::remove_file(policy_cache()); None }
+        // Offline: the last policy that verified, verified again.
+        Err(e) => Some(std::fs::read(policy_cache()).ok().and_then(|b| verify_policy(&b, &key)).ok_or(Error::Failed(e))?),
+    };
+    let Some(policy) = policy else { return Ok(Required::None) };
+    let Some(min) = required_version(&policy, platform, env!("CARGO_PKG_VERSION")) else { return Ok(Required::None) };
+    let manifest = match read_manifest(platform) {
+        Ok(m) if !offers(&m, &min) => {
+            crate::logging::write(&format!("update policy: requires {min} but the newest package is {}; nothing forced", m.version));
+            return Ok(Required::None);
+        }
+        Ok(m) => Some(m),
+        Err(_) => None,
+    };
+    Ok(Required::Update { min, policy, manifest })
+}
+
+/// The required update in a window: the dialog once the package is ready
+/// ([`blocking`]), else a banner at the foot of the window that leaves the
+/// notes usable (downloading, offline, a failed download or install).
+pub fn prompt(window: &mut Window, cx: &mut Context<crate::app::Workspace>) -> Option<AnyElement> {
+    use crate::{settings::tr, theme::{self, craft, Theme}, ui};
+    let f = forced(cx)?;
+    let state = state(cx);
+    if blocking(cx) {
+        let State::Ready(m, _) = &state else { return None };
+        let body = crate::localized_format!("这个版本需要更新后才能继续使用。{} 已下载好，重启即可完成更新，打开的文档会先保存。", "This version must be updated before you continue. Version {} is downloaded; Quiet.md restarts to finish, and open documents are saved first.", m.version);
+        let dialog = ui::dialog("forced-update-dialog").w(px(440.)).px(px(24.)).pt(px(20.)).pb(px(24.))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().text_size(px(15.)).line_height(px(22.)).font_weight(FontWeight::SEMIBOLD).child(ui::ui_para(tr("需要更新 Quiet.md", "Quiet.md needs to update"))))
+            .children(f.message().map(|t| div().mt(px(8.)).text_size(px(13.)).line_height(px(20.)).child(ui::ui_para(t.to_string()))))
+            .child(div().mt(px(8.)).text_size(px(13.)).line_height(px(20.)).text_color(Theme::text_caption()).child(ui::ui_para(body)))
+            .child(div().mt(px(24.)).flex().justify_end()
+                .child(ui::primary_button("forced-update-restart", tr("立即重启更新", "Restart and Update")).on_click(|_, _, cx| install(cx))));
+        return Some(deferred(div().id("forced-update-mask").occlude().absolute().inset_0().flex().items_center().justify_center().bg(ui::scrim())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(dialog)).with_priority(4).into_any_element());
+    }
+    let (text, retry): (String, bool) = match (&state, &f.error) {
+        (State::Installing(_), _) => return None,
+        (State::Ready(..), Some(e)) => (crate::localized_format!("无法完成必需的更新：{}", "Couldn't finish a required update: {}", e), true),
+        (State::Downloading(m), _) => (crate::localized_format!("正在下载必需的更新 {}… {:.0}%", "Downloading a required update ({})… {:.0}%", m.version, progress(m) * 100.), false),
+        _ => (crate::localized_format!("这个版本需要更新到 {} 或更高。暂时无法下载，联网后会自动重试。", "This version must be updated to {} or later. The download retries automatically once you're online.", f.min), true),
+    };
+    let width = (f32::from(window.viewport_size().width) - 32.).clamp(200., 560.);
+    let card = div().id("forced-update-banner").occlude().w(px(width)).flex().items_start().gap(px(10.)).px(px(14.)).py(px(10.))
+        .rounded(px(12.)).bg(theme::raised(Theme::bg_body())).border_1().border_color(Theme::line_border()).shadow(theme::shadow_panel())
+        .font_family(theme::ui_family()).text_size(px(13.)).line_height(px(20.)).text_color(Theme::text())
+        .child(div().relative().mt(px(2.)).size(px(16.)).flex_none().flex().items_center().justify_center()
+            .child(ui::icon("circle-filled", 16., theme::c(craft::O400)).absolute().top_0().left_0())
+            .child(ui::icon("info-mark", 12., gpui::white())))
+        .child(div().flex_1().min_w_0().flex().flex_col()
+            .child(ui::ui_para(text))
+            .children(f.message().map(|t| div().text_size(px(12.)).line_height(px(18.)).text_color(Theme::text_caption()).truncate().child(t.to_string()))))
+        .when(retry, |d| d.child(ui::secondary_button("forced-update-retry", tr("重试", "Retry")).h(px(26.)).px(px(12.)).on_click(|_, _, cx| retry_forced(cx))));
+    Some(deferred(div().absolute().left_0().right_0().bottom(px(16.)).flex().justify_center().child(card)).with_priority(2).into_any_element())
 }
 
 // ---- the server
@@ -214,12 +454,18 @@ fn supported() -> bool {
 /// The newest version when it is later than this one.
 fn fetch_manifest() -> Result<Option<Manifest>, Error> {
     if !supported() { return Err(Error::Unsupported) }
-    let platform = platform().unwrap();
-    let url = format!("{}/update-{platform}.json", override_url().as_deref().unwrap_or(BASE).trim_end_matches('/'));
-    let body = curl_manifest(&url, override_url().is_some()).map_err(Error::Failed)?.ok_or(Error::NotPublished)?;
-    let m: Manifest = serde_json::from_slice(&body).map_err(|e| Error::Failed(format!("{}: {e}", crate::settings::tr("更新信息无法识别", "Unrecognised update information"))))?;
-    validate(&m, platform, override_url().is_some()).map_err(Error::Failed)?;
+    let m = read_manifest(platform().unwrap())?;
     Ok(newer(&m.version, env!("CARGO_PKG_VERSION")).then_some(m))
+}
+
+/// The newest version on offer, validated, whichever it is.
+fn read_manifest(platform: &str) -> Result<Manifest, Error> {
+    let override_url = override_url();
+    let url = format!("{}/update-{platform}.json", override_url.as_deref().unwrap_or(BASE).trim_end_matches('/'));
+    let body = curl_manifest(&url, override_url.is_some()).map_err(Error::Failed)?.ok_or(Error::NotPublished)?;
+    let m: Manifest = serde_json::from_slice(&body).map_err(|e| Error::Failed(format!("{}: {e}", crate::settings::tr("更新信息无法识别", "Unrecognised update information"))))?;
+    validate(&m, platform, override_url.is_some()).map_err(Error::Failed)?;
+    Ok(m)
 }
 
 /// The manifest names this platform's package for its version, over HTTPS,
@@ -241,9 +487,9 @@ fn signed(bytes: &[u8], signature: &str, name: &str, key: &minisign_verify::Publ
 }
 
 fn updates_dir() -> PathBuf {
-    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+    let base = dirs::cache_dir().unwrap_or_else(fdl_core::vfs::temp_dir);
     let dir = base.join("io.github.yqhuang2912.mynote").join("updates");
-    if cfg!(target_os = "linux") { dir.join(std::process::id().to_string()) } else { dir }
+    if cfg!(target_os = "linux") { dir.join(fdl_core::vfs::process_id().to_string()) } else { dir }
 }
 
 /// Downloads, checks the signature and (macOS) unpacks; the path to install.
@@ -252,14 +498,16 @@ fn fetch_package(m: &Manifest) -> Result<PathBuf, String> {
     let name = package_name(&m.version, platform);
     let dir = updates_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Only this user may swap the package between its check and its install.
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)); }
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("download.lock")).map_err(|e| e.to_string())?;
     lock.try_lock().map_err(|_| crate::settings::tr("另一个实例正在下载更新，请稍后重试", "Another instance is downloading an update. Try again shortly.").to_string())?;
     let key = public_key().ok_or("update key")?;
     let file = transfer::fetch(m, &name, &dir, &key)?;
     #[cfg(target_os = "macos")]
-    let failed = |what: &str| format!("{}: {what}", crate::settings::tr("更新包校验失败", "The update package failed verification"));
-    #[cfg(target_os = "macos")]
     {
+        let failed = |what: &str| format!("{}: {what}", crate::settings::tr("更新包校验失败", "The update package failed verification"));
         let unpacked = dir.join(format!("app-{}-{platform}", m.version));
         if unpacked.exists() { std::fs::remove_dir_all(&unpacked).map_err(|e| e.to_string())?; }
         run(Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(&file).arg(&unpacked))?;
@@ -293,6 +541,16 @@ fn curl_manifest(url: &str, testing: bool) -> Result<Option<Vec<u8>>, String> {
 fn curl_error(stderr: &[u8]) -> String {
     let msg = String::from_utf8_lossy(stderr).trim().trim_start_matches("curl: ").to_string();
     format!("{}: {msg}", crate::settings::tr("无法连接更新服务器", "Could not reach the update server"))
+}
+
+/// `curl` as every download here runs it (fonts too: font_downloads):
+/// HTTPS only, redirects too, unless `testing` (a test server may be plain
+/// http); the system's proxy settings, as curl reads them.
+pub(crate) fn curl_command(testing: bool) -> Command {
+    let proto = if testing { "=https,http" } else { "=https" };
+    let mut c = command("curl");
+    c.args(["-fsSL", "--proto", proto, "--proto-redir", proto, "--connect-timeout", "15"]);
+    c
 }
 
 /// A command that opens no console window on Windows.
@@ -351,16 +609,16 @@ fn start_installer(new: &Path) -> Result<(), String> {
         return Err(crate::settings::tr("请先把 Quiet.md 移到「应用程序」文件夹，再更新", "Move Quiet.md to the Applications folder first, then update").into());
     }
     // The folder must take the new bundle (a standard user cannot write to /Applications).
-    let probe = parent.join(format!(".quiet.md-update-{}", std::process::id()));
+    let probe = parent.join(format!(".quiet.md-update-{}", fdl_core::vfs::process_id()));
     if std::fs::create_dir(&probe).is_err() {
         return Err(crate::localized_format!("没有写入 {} 的权限，请从网站下载新版本", "No permission to write to {}. Download the new version from the website instead.", parent.display()));
     }
     let _ = std::fs::remove_dir(&probe);
-    let old = parent.join(format!(".quiet.md-old-{}.app", std::process::id()));
+    let old = parent.join(format!(".quiet.md-old-{}.app", fdl_core::vfs::process_id()));
     let env = ["QUIET_MD_HOME", "QUIET_MD_UPDATE_URL"].into_iter()
         .filter_map(|k| std::env::var(k).ok().map(|v| ["--env".to_string(), format!("{k}={v}")])).flatten();
     Command::new("/bin/sh").arg("-c").arg(SWAP).arg("sh")
-        .arg(std::process::id().to_string()).arg(&app).arg(new).arg(&old).args(env)
+        .arg(fdl_core::vfs::process_id().to_string()).arg(&app).arg(new).arg(&old).args(env)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
         .process_group(0).spawn().map(drop).map_err(|e| e.to_string())
 }
@@ -436,7 +694,7 @@ fn start_installer(new: &Path) -> Result<(), String> {
         std::fs::hard_link(&app, stage.join("previous.AppImage")).map_err(|e| e.to_string())?;
         std::fs::hard_link(&staged, stage.join("installed.AppImage")).map_err(|e| e.to_string())?;
         Command::new("/bin/sh").arg("-c").arg(SWAP_APPIMAGE).arg("sh")
-            .arg(std::process::id().to_string()).arg(&app).arg(&stage).arg(identity).args(std::env::args_os().skip(1))
+            .arg(fdl_core::vfs::process_id().to_string()).arg(&app).arg(&stage).arg(identity).args(std::env::args_os().skip(1))
             .env_remove("APPIMAGE").env_remove("APPDIR").env_remove("ARGV0").env_remove("OWD").env_remove("XLOCALEDIR")
             .current_dir(parent).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .process_group(0).spawn().map(drop).map_err(|e| e.to_string())
@@ -451,7 +709,7 @@ fn start_installer(_: &Path) -> Result<(), String> { Err("unsupported".into()) }
 
 #[cfg(test)]
 mod tests {
-    use super::{newer, signed, validate, Manifest};
+    use super::{newer, offers, policy_comment, required_version, signed, validate, verify_policy, Manifest, Policy};
 
     #[test]
     fn versions_compare_numerically() {
@@ -505,6 +763,10 @@ FuE4L1zQnqL1nA/5xffpEtZyK2ca882Q1joA5X11poZ1xezdAlEMfn/36MJc5C60clQFec4vQf66MoxP
         let http = manifest("0.2.0", "http://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
         assert!(validate(&http, "macos-arm64", false).is_err());
         assert_eq!(validate(&http, "macos-arm64", true), Ok(()));
+        // A genuine signature does not make another host acceptable.
+        for url in ["https://evil.example/v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "https://download.quiet.md.evil.example/quiet-md-0.2.0-macos-arm64.zip", "https://evil.example/download.quiet.md/quiet-md-0.2.0-macos-arm64.zip"] {
+            assert!(validate(&manifest("0.2.0", url, "quiet-md-0.2.0-macos-arm64.zip"), "macos-arm64", false).is_err(), "{url}");
+        }
         let windows = manifest("0.2.0", "https://github.com/yqhuang2912/quiet-md/releases/download/mynote-v0.2.0/quiet-md-0.2.0-windows-x64-setup.exe", "quiet-md-0.2.0-windows-x64-setup.exe");
         assert_eq!(validate(&windows, "windows-x64", false), Ok(()));
         assert!(validate(&windows, "macos-arm64", false).is_err());
@@ -550,6 +812,68 @@ FuE4L1zQnqL1nA/5xffpEtZyK2ca882Q1joA5X11poZ1xezdAlEMfn/36MJc5C60clQFec4vQf66MoxP
         assert_eq!(fetch("200 OK", "{\"version\":\"0.2.0\"}\n").unwrap(), Some(b"{\"version\":\"0.2.0\"}\n".to_vec()));
         assert!(fetch("500 Internal Server Error", "unavailable").unwrap_err().contains("HTTP 500"));
     }
+
+    // Another throwaway key and a policy.json it signed (requires 0.2.0, 0.3.0 on Windows).
+    const POLICY_KEY: &str = "RWTvwKTrlEuycFdZ1p3RqVyoclgLtHgZzMmNWy3cmLek9Q9QcUcl87Mg";
+    const OTHER_KEY: &str = "RWS/jltwgkWSZi1xiI1u1/qE2OJj9UswI7SlTEaGdJnTie28IxU+EsMO";
+    const POLICY: &str = r#"{"policy": "{\"message_en\":\"Fixes data loss.\",\"message_zh\":\"修复数据丢失。\",\"min_version\":\"0.2.0\",\"platforms\":{\"windows-x64\":\"0.3.0\"}}", "signature": "untrusted comment: signature from minisign secret key\nRUTvwKTrlEuycKrn7m4egRLvx4YtSR71nd4nWGkK5ywSBXN9dgPfEzUkRndz24uYYKMsQJWEMD5usm7TFtbwL4eWsanE/98rEQo=\ntrusted comment: quiet-md-policy sha256:ee553349d0473ae4478131f7fb7f00448d9cef47d746f9491f4536ab4e1b17a5\n0a/1ujlwXddCwk8fHJcgtW4PBcW542+Cz6N9eLSfoN4azkNX1epq4MywSXwDjZ0qJQqzfSv++1wat454TOpDBA==\n"}"#;
+
+    #[test]
+    fn policies_verify_only_as_signed() {
+        let key = minisign_verify::PublicKey::from_base64(POLICY_KEY).unwrap();
+        let p = verify_policy(POLICY.as_bytes(), &key).expect("genuine policy");
+        assert_eq!(p.min_version, "0.2.0");
+        assert_eq!(p.platforms.get("windows-x64").map(String::as_str), Some("0.3.0"));
+        assert_eq!(p.message_zh, "修复数据丢失。");
+        // Another key.
+        assert!(verify_policy(POLICY.as_bytes(), &minisign_verify::PublicKey::from_base64(OTHER_KEY).unwrap()).is_none());
+        // The text changed: the hash in the trusted comment no longer matches…
+        let raised = POLICY.replace(r#"\"min_version\":\"0.2.0\""#, r#"\"min_version\":\"0.9.0\""#);
+        assert_ne!(raised, POLICY);
+        assert!(verify_policy(raised.as_bytes(), &key).is_none());
+        // …and naming the new hash breaks the signature over the comment.
+        let body: serde_json::Value = serde_json::from_str(&raised).unwrap();
+        let rehashed = raised.replace("ee553349d0473ae4478131f7fb7f00448d9cef47d746f9491f4536ab4e1b17a5", policy_comment(body["policy"].as_str().unwrap()).trim_start_matches("quiet-md-policy sha256:"));
+        assert!(verify_policy(rehashed.as_bytes(), &key).is_none());
+        // A package's signature (trusted comment: its file name) is no policy, even over the same bytes.
+        let package_sig = serde_json::json!({ "policy": "quiet.md", "signature": TEST_SIG }).to_string();
+        assert!(verify_policy(package_sig.as_bytes(), &minisign_verify::PublicKey::from_base64(TEST_KEY).unwrap()).is_none());
+        // Nor is the policy's signature a package's: its comment is no package name.
+        let sig = serde_json::from_str::<serde_json::Value>(POLICY).unwrap()["signature"].as_str().unwrap().to_string();
+        assert!(!signed(b"quiet.md", &sig, "quiet-md-0.2.0-macos-arm64.zip", &key));
+        // Not JSON, or a manifest from before policies existed.
+        assert!(verify_policy(b"<html>not found</html>", &key).is_none());
+        let manifest = serde_json::json!({ "version": "0.2.0", "url": "https://download.quiet.md/v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "size": 8, "signature": TEST_SIG }).to_string();
+        assert!(verify_policy(manifest.as_bytes(), &key).is_none());
+    }
+
+    #[test]
+    fn policies_require_only_newer_versions() {
+        let p: Policy = serde_json::from_str(r#"{"min_version":"0.2.0","platforms":{"windows-x64":"0.3.0"},"later":"ignored"}"#).unwrap();
+        assert_eq!(required_version(&p, "macos-arm64", "0.1.14").as_deref(), Some("0.2.0"));
+        assert_eq!(required_version(&p, "macos-arm64", "0.2.0"), None);
+        assert_eq!(required_version(&p, "macos-arm64", "0.2.1"), None);
+        assert_eq!(required_version(&p, "windows-x64", "0.2.0").as_deref(), Some("0.3.0"));
+        assert_eq!(required_version(&p, "windows-x64", "0.3.0"), None);
+        // Cleared, empty or malformed: nothing required.
+        assert_eq!(required_version(&Policy::default(), "macos-arm64", "0.0.1"), None);
+        assert_eq!(required_version(&serde_json::from_str::<Policy>("{}").unwrap(), "macos-arm64", "0.0.1"), None);
+        let bad: Policy = serde_json::from_str(r#"{"min_version":"0.2.x"}"#).unwrap();
+        assert_eq!(required_version(&bad, "macos-arm64", "0.1.0"), None);
+        // Only one platform.
+        let one: Policy = serde_json::from_str(r#"{"platforms":{"linux-x86_64":"0.2.0"}}"#).unwrap();
+        assert_eq!(required_version(&one, "macos-arm64", "0.1.0"), None);
+        assert_eq!(required_version(&one, "linux-x86_64", "0.1.0").as_deref(), Some("0.2.0"));
+    }
+
+    #[test]
+    fn a_policy_ahead_of_the_packages_forces_nothing() {
+        let m = manifest("0.2.0", "https://download.quiet.md/v0.2.0/quiet-md-0.2.0-macos-arm64.zip", "quiet-md-0.2.0-macos-arm64.zip");
+        assert!(offers(&m, "0.2.0"));
+        assert!(offers(&m, "0.1.15"));
+        assert!(!offers(&m, "0.2.1"));
+        assert!(!offers(&m, "1.0"));
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -561,7 +885,7 @@ mod linux_tests {
     #[test]
     fn appimage_swap_waits_preserves_arguments_and_recovers() {
         for case in ["success", "failed-launch", "concurrent", "missing-stage"] {
-            let root = std::env::temp_dir().join(format!("quiet update 中文 {}", uuid::Uuid::new_v4()));
+            let root = fdl_core::vfs::temp_dir().join(format!("quiet update 中文 {}", uuid::Uuid::new_v4()));
             let stage = root.join("stage with spaces");
             std::fs::create_dir_all(&stage).unwrap();
             let app = root.join("quiet $name.AppImage");

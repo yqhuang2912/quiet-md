@@ -10,3 +10,7 @@
 /dist-release.*
 .wrangler/
 __pycache__/
+/tools/vendor-sync/target
+
+# The web demo (web/build.sh, web/bundle.py): build output, deployed with the site.
+/site/public/demo/

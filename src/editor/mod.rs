@@ -1,3 +1,6 @@
+mod bidi;
+mod board;
+mod datatable;
 mod button;
 mod caption;
 mod catalogue;

@@ -12,7 +12,11 @@ pub(crate) struct FileHistory {
 }
 impl Workspace {
     pub(crate) fn remember_files(&mut self, journal: crate::store::FileChanges, label: &'static str) -> u64 {
-        let changes = journal.take();
+        self.remember_file_changes(journal.take(), label)
+    }
+
+    /// `remember_files` for changes written by a background store (导入文件夹).
+    pub(crate) fn remember_file_changes(&mut self, changes: Vec<FileDelta>, label: &'static str) -> u64 {
         let entries = self.file_record_entries(&changes);
         self.push_file_record(changes, entries, label)
     }
@@ -60,6 +64,20 @@ impl Workspace {
         if self.file_history.undo.len() > 100 { self.file_history.undo.remove(0); }
         self.file_history.redo.clear(); self.file_history.prefer_files = true;
         token
+    }
+
+    /// Fold `changes` into the newest record when it made one of `ids`: a
+    /// drop places what it imported, and one undo takes both back.
+    pub(crate) fn amend_file_record(&mut self, ids: &[String], changes: Vec<FileDelta>) {
+        let Some(record) = self.file_history.undo.last_mut().filter(|r| r.changes.iter().any(|c| ids.contains(&c.id))) else { return };
+        let mut merged = std::mem::take(&mut record.changes);
+        for delta in changes {
+            match merged.iter_mut().find(|c| c.id == delta.id) { Some(c) => c.after = delta.after, None => merged.push(delta) }
+        }
+        merged.retain(|c| c.before != c.after);
+        let entries = self.file_record_entries(&merged);
+        let record = self.file_history.undo.last_mut().unwrap();
+        record.changes = merged; record.entries = entries;
     }
 
     pub(crate) fn forget_file_change(&mut self, token: u64) {
@@ -135,7 +153,7 @@ impl Workspace {
                         if let Some(id) = w.current.clone() {
                             if let Some(entry) = w.entries.iter().find(|e| e.id == id) {
                                 if let Some(ed) = &w.editor { let title = entry.title.clone(); let _ = w.store.accept_file_title(&id, &title); ed.update(cx, |e, cx| e.receive_file_title(&title, cx)); }
-                            } else { w.editor = None; w.editor_sub = None; w.current = None; w.view = View::Home; window.focus(&w.focus); }
+                            } else { w.editor = None; w.editor_sub = None; w.current = None; w.view = View::Home; window.focus(&w.focus, cx); }
                         }
                         if w.folder_current.as_ref().is_some_and(|id| !w.entries.iter().any(|e| &e.id == id)) { w.folder_current = None; w.view = View::Home; }
                         w.trash = w.store.list_trash();

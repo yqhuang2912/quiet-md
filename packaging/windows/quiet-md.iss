@@ -1,8 +1,8 @@
 ﻿#ifndef AppVersion
-#define AppVersion "0.2.4"
+#define AppVersion "0.2.5"
 #endif
 #ifndef AppSource
-  #define AppSource "..\..\target\release"
+  #define AppSource "..\..\target\dist"
 #endif
 
 [Setup]
@@ -19,7 +19,7 @@ DisableReadyPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0.19041
+MinVersion=10.0.17763
 OutputDir=..\..\dist\windows
 OutputBaseFilename=quiet-md-{#AppVersion}-windows-x64-setup
 SetupIconFile=..\..\assets\branding\app-icon.ico
@@ -62,7 +62,7 @@ Source: "..\..\THIRD_PARTY.md"; DestDir: "{app}"
 Name: "{userprograms}\Quiet.md MyNote"; Filename: "{app}\quiet_md.exe"; WorkingDir: "{app}"
 Name: "{userdesktop}\Quiet.md MyNote"; Filename: "{app}\quiet_md.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
-; "Open with" for Markdown files (not the default app): they are edited in place.
+; "Open with" for Markdown files and folders (not the default app): they are edited in place.
 [Registry]
 Root: HKA; Subkey: "Software\Classes\MyNote.Markdown"; ValueType: string; ValueName: ""; ValueData: "Markdown"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\MyNote.Markdown\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\quiet_md.exe,0"
@@ -71,6 +71,10 @@ Root: HKA; Subkey: "Software\Classes\.md\OpenWithProgids"; ValueType: string; Va
 Root: HKA; Subkey: "Software\Classes\.markdown\OpenWithProgids"; ValueType: string; ValueName: "MyNote.Markdown"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\quiet_md.exe\SupportedTypes"; ValueType: string; ValueName: ".md"; ValueData: ""; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\quiet_md.exe\SupportedTypes"; ValueType: string; ValueName: ".markdown"; ValueData: ""
+; Folders: "Open with Quiet.md" in the Explorer's context menu, listed under 本机文件.
+Root: HKA; Subkey: "Software\Classes\Directory\shell\QuietMd"; ValueType: string; ValueName: ""; ValueData: "Open with Quiet.md"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\QuietMd"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\quiet_md.exe,0"
+Root: HKA; Subkey: "Software\Classes\Directory\shell\QuietMd\command"; ValueType: string; ValueName: ""; ValueData: """{app}\quiet_md.exe"" ""%1"""
 
 [Run]
 Filename: "{app}\quiet_md.exe"; Description: "Launch Quiet.md"; Flags: nowait postinstall skipifsilent
@@ -99,7 +103,7 @@ begin
   LibraryPage := CreateInputDirPage(wpSelectDir,
     'Choose document library / 选择文档库位置',
     'Where should your notes and attachments be saved? / 笔记和附件保存在哪里？',
-    'This folder stores your notes, attachments and NAS sync settings. It is separate from the application folder.'#13#10 +
+    'This folder stores your notes and attachments. It is separate from the application folder.'#13#10 +
     'Choose an empty folder or an existing MyNote library. Future updates keep this location.'#13#10#13#10 +
     '请选择空文件夹或已有的文档库，后续升级会保留此位置。',
     False, 'Quiet.md');
@@ -147,7 +151,8 @@ begin
     MsgBox('Save documents separately from the application folder. / 文档库不能放在程序安装文件夹内。', mbError, MB_OK);
     Result := False;
   end else if FileExists(Folder) or (DirExists(Folder) and HasContents(Folder) and
-    not (FileExists(AddBackslash(Folder) + 'format.json') and DirExists(AddBackslash(Folder) + 'docs'))) then begin
+    not (FileExists(AddBackslash(Folder) + '.quiet\format.json') or
+    (FileExists(AddBackslash(Folder) + 'format.json') and DirExists(AddBackslash(Folder) + 'docs')))) then begin
     MsgBox('Choose an empty folder or an existing MyNote library. / 请选择空文件夹或已有的文档库。', mbError, MB_OK);
     Result := False;
   end;

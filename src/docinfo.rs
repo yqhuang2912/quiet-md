@@ -102,7 +102,7 @@ impl Workspace {
         });
         self.doc_menu = false;
         self.doc_sub = None;
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 

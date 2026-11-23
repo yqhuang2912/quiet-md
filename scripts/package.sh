@@ -30,12 +30,12 @@ app="$out/quiet.md.app"
 dmg="$out/quiet.md-$version.dmg"
 
 echo "== 编译 $version"
-cargo build --release --locked
+cargo build --profile dist --locked
 
 echo "== 组装 $app"
 rm -rf "$out"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/quiet_md "$app/Contents/MacOS/quiet_md"
+cp target/dist/quiet_md "$app/Contents/MacOS/quiet_md"
 # .icns：Finder 和 Dock 用图标文件，不是裸 PNG。
 iconset=$(mktemp -d)/icon.iconset
 mkdir -p "$iconset"
@@ -65,6 +65,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSHandlerRank</key><string>Alternate</string>
     <key>LSItemContentTypes</key><array><string>net.daringfireball.markdown</string></array>
     <key>CFBundleTypeExtensions</key><array><string>md</string><string>markdown</string><string>mdown</string></array>
+  </dict><dict>
+    <key>CFBundleTypeName</key><string>Folder</string>
+    <key>CFBundleTypeRole</key><string>Editor</string>
+    <key>LSHandlerRank</key><string>Alternate</string>
+    <key>LSItemContentTypes</key><array><string>public.folder</string></array>
   </dict></array>
 </dict></plist>
 PLIST

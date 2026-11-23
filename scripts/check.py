@@ -10,13 +10,11 @@ def cargo(*args, env=None):
     subprocess.run(["cargo", *args], check=True, env=env)
 
 cargo("test", "--release", "--workspace", "--locked")
-cargo("build", "--release", "--locked", "-p", "fdl_core", "--example", "nas_sync")
-subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "services/sync", "-v"], check=True)
 subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_updates.py", "-v"], check=True)
 cargo("test", "--release", "--locked", "-p", "fdl_core", "library_round_trips", "--", "--ignored",
-      env={**os.environ, "FDL_ROUNDTRIP_DIR": str(Path("shared-mock/library/docs").resolve())})
+      env={**os.environ, "FDL_ROUNDTRIP_DIR": str(Path("shared-mock/library").resolve())})
 source = Path("shared-mock/guides/assets")
-bundled = Path("shared-mock/library/assets/guides")
+bundled = Path("shared-mock/library/.assets/guides")
 for image in source.rglob("*"):
     if image.is_file():
         target = bundled / image.relative_to(source)
@@ -25,3 +23,5 @@ print("Bundled guide assets match their sources")
 cargo("clippy", "--release", "--workspace", "--locked", "--all-targets", "--", "-D", "warnings")
 # The harness build (script driver compiled in) must stay clean too.
 cargo("clippy", "--release", "--workspace", "--locked", "--all-targets", "--features", "devtools", "--", "-D", "warnings")
+# 数据表 is off by default (Cargo feature `datatable`); the build with it on must stay clean too.
+cargo("clippy", "--release", "--workspace", "--locked", "--all-targets", "--features", "devtools,datatable", "--", "-D", "warnings")

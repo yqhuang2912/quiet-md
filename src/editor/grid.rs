@@ -11,7 +11,8 @@ use crate::editor_ui::TipExt;
 use gpui::{prelude::FluentBuilder, *};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Visual gap between two column boxes.
 const GAP: f32 = 20.;
@@ -103,7 +104,7 @@ impl Editor {
         from.insert(at.min(from.len()), 0.);
         self.col_anim.insert(grid, (from, Instant::now()));
         self.gap_hover = None;
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.changed(window, cx);
     }
 
@@ -145,7 +146,7 @@ impl Editor {
         let Some(d) = self.col_drag.take() else { return };
         self.core.set_column_ratios(d.grid, &d.live);
         if self.core.dirty {
-            self.changed(window, cx);
+            self.changed_preserving_viewport(window, cx);
         }
         cx.notify();
     }
@@ -205,7 +206,7 @@ impl R<'_> {
                             .px(px(5.))
                             .rounded(px(6.))
                             .bg(theme::ca(craft::N950, 0.75))
-                            .font_family(theme::UI_FONT)
+                            .font_family(theme::ui_family())
                             .text_size(px(11.))
                             .line_height(px(18.))
                             .text_color(Theme::bg_body())
@@ -222,7 +223,7 @@ impl R<'_> {
                     cx.listener(move |e, _, window, cx| {
                         cx.stop_propagation();
                         e.core.focus_column_end(cid);
-                        window.focus(&e.focus);
+                        window.focus(&e.focus, cx);
                         e.changed(window, cx);
                     }),
                 ));

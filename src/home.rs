@@ -14,7 +14,7 @@ use crate::settings::display_title;
 use crate::model::BlockKind;
 use crate::search::doc_icon;
 use crate::store::Entry;
-use crate::editor::image::PictureExt;
+use crate::editor::image::picture;
 use crate::theme::{self, Theme};
 use crate::trash::{empty_state, list_header_text, list_line, menu_label, page_header, row_hover};
 use crate::ui::{ROW_RADIUS, TipExt, icon, menu_glyph, menu_row, popover, ui_text};
@@ -56,8 +56,38 @@ const STARRED_COLS: [Col; 4] = [Col::Modified, Col::Created, Col::Visited, Col::
 
 /// Bounded document trees retain formatting without retaining a whole long document.
 type EquationNumbers = HashMap<crate::model::BlockId, u32>;
-struct ThumbContent { blocks: Vec<crate::model::Block>, eqnos: EquationNumbers, cover: Option<crate::model::Cover> }
+/// `tables`: the 数据表 files the page shows (their rows drawn in the card), saved apart from the page.
+struct ThumbContent { blocks: Vec<crate::model::Block>, eqnos: EquationNumbers, has_subpages: bool, tables: Vec<String> }
 type Thumb = Rc<ThumbContent>;
+
+/// The files of the 数据表 blocks in `blocks`, at any depth.
+fn table_srcs(blocks: &[crate::model::Block], out: &mut Vec<String>) {
+    for b in blocks {
+        match &b.kind {
+            BlockKind::DataTable(t) => out.push(t.src.clone()),
+            BlockKind::Table(t) => for cell in t.rows.iter().flatten() { table_srcs(&cell.blocks, out) },
+            _ => {}
+        }
+        table_srcs(&b.children, out);
+    }
+}
+
+/// When the files in `srcs` (relative to the library) last changed, as one number.
+fn tables_time(srcs: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    let root = crate::store::Store::root_dir();
+    for s in srcs { std::fs::metadata(root.join(s)).and_then(|m| m.modified()).ok().hash(&mut h); }
+    h.finish()
+}
+
+fn has_subpage_list(blocks: &[crate::model::Block]) -> bool {
+    blocks.iter().any(|b| match &b.kind {
+        BlockKind::SubPageList => true,
+        BlockKind::Table(t) => t.rows.iter().any(|row| row.iter().any(|cell| has_subpage_list(&cell.blocks))),
+        _ => has_subpage_list(&b.children),
+    })
+}
 
 fn thumb_blocks(blocks: &[crate::model::Block], budget: &mut usize, depth: usize, numbers: &EquationNumbers, eqnos: &mut EquationNumbers) -> Vec<crate::model::Block> {
     if depth > 8 { return vec![]; }
@@ -85,10 +115,22 @@ fn thumb_blocks(blocks: &[crate::model::Block], budget: &mut usize, depth: usize
                 let (iw, ih) = dimensions.map(|(w, h)| (w.max(1) as f32, h.max(1) as f32)).unwrap_or((690., 460.));
                 let w = width.unwrap_or_else(|| height.map(|h| h * iw / ih).unwrap_or(iw)).max(1.);
                 let h = height.unwrap_or(w * ih / iw).max(1.);
+                // No wider than the page: a 1536 px picture would otherwise reserve its full height below a narrower drawing.
+                let (w, h) = if w > 690. { (690., h * 690. / w) } else { (w, h) };
                 if let BlockKind::Image { width, height, .. } = &mut kind { *width = Some(w); *height = Some(h); }
                 kind
             }
             BlockKind::Raw { tag, .. } => BlockKind::Raw { tag: tag.clone(), xml: String::new() },
+            // a 数据表 (a table file's card, or one in a page): its first rows and columns as a table, header first
+            BlockKind::DataTable(r) => {
+                let grid = fdl_core::table::block_grid(&crate::store::Store::root_dir(), r);
+                let (nr, nc) = (grid.len().min(9), grid.first().map_or(0, |h| h.len().min(5)));
+                if nr == 0 || nc == 0 { BlockKind::Table(crate::model::Table { col_widths: vec![], header_rows: 0, header_col: false, rows: vec![] }) } else {
+                    let cell = |s: &str| crate::model::TableCell { blocks: vec![crate::model::Block::text(s)], ..crate::model::TableCell::empty() };
+                    let rows = grid.iter().take(nr).map(|row| (0..nc).map(|c| cell(row.get(c).map_or("", |s| s.as_str()))).collect()).collect();
+                    BlockKind::Table(crate::model::Table { col_widths: vec![crate::model::Table::DEFAULT_WIDTH * 1.4; nc], header_rows: 1, header_col: false, rows })
+                }
+            }
             kind => kind.clone(),
         };
         let text = b.text.slice(0..end);
@@ -103,12 +145,7 @@ fn thumb_blocks(blocks: &[crate::model::Block], budget: &mut usize, depth: usize
                 crate::model::InlineKind::Equation(_) => unreachable!(),
                 crate::model::InlineKind::File(file) => file.name.clone(),
                 crate::model::InlineKind::Button(button) => button.text.clone(),
-                crate::model::InlineKind::Reminder(reminder) => {
-                    if crate::settings::english() {
-                        let (y, m, d, h, mi) = crate::time::civil(reminder.expire.max(0) as u64 / 1000);
-                        if reminder.whole_day { format!("{y}-{m:02}-{d:02}") } else { format!("{y}-{m:02}-{d:02} {h:02}:{mi:02}") }
-                    } else { reminder.label(" ") }
-                },
+                crate::model::InlineKind::Reminder(reminder) => crate::editor::reminder::reminder_label(reminder, " "),
                 crate::model::InlineKind::DocLink(doc) => display_title(&doc.title).to_string(),
                 crate::model::InlineKind::Other { tag } => tag.clone(),
             }).map(|label| label.chars().take(160).collect::<String>());
@@ -130,6 +167,13 @@ fn thumb_blocks(blocks: &[crate::model::Block], budget: &mut usize, depth: usize
     }
     out
 }
+
+/// Home cards decode pictures at this share of the size they are drawn:
+/// a card is small and glanced at, so a softer picture costs nothing.
+const THUMB: f32 = 0.75;
+
+/// Long edge drawn for a picture `w` wide with this width / height `ratio`.
+fn thumb_long(w: f32, ratio: f32) -> f32 { (if ratio >= 1. { w } else { w / ratio }) * THUMB }
 
 fn thumb_block(b: &crate::model::Block, depth: usize, inherited: Hsla, quote: bool, eqnos: &EquationNumbers) -> AnyElement {
     thumb_block_in(b, depth, inherited, quote, false, 0, eqnos)
@@ -154,7 +198,9 @@ fn thumb_block_in(b: &crate::model::Block, depth: usize, inherited: Hsla, quote:
             let media = div().relative().flex_none().w_full().max_w_full().overflow_hidden().when_some(*width, |d, w| d.w(px(w * s)))
                 .map(|mut d| { d.style().aspect_ratio = Some(ratio); d });
             node = node.child(if let Some(path) = path {
-                media.child(img(path).doc_picture().absolute().inset_0().size_full().min_w_0().min_h_0().rounded(px(bs::RADIUS * s)).object_fit(ObjectFit::Contain)).into_any_element()
+                // The web demo fetches pictures on first use: an empty frame until then.
+                if fdl_core::vfs::pending(&path) { media.into_any_element() } else {
+                media.child(picture(&path, thumb_long(width.unwrap_or(690.).min(690.), ratio) * s).absolute().inset_0().size_full().min_w_0().min_h_0().rounded(px(bs::RADIUS * s)).object_fit(ObjectFit::Contain)).into_any_element() }
             } else {
                 media.rounded(px(bs::RADIUS * s)).bg(bs::code_surface()).flex().items_center().justify_center().child(icon("image-broken", 24. * s, Theme::text_disabled())).into_any_element()
             });
@@ -178,7 +224,7 @@ fn thumb_block_in(b: &crate::model::Block, depth: usize, inherited: Hsla, quote:
         }
         BlockKind::Code { lang, caption, wrap } => {
             node = node.rounded(px(bs::RADIUS * s)).border(px(s)).border_color(Theme::line_border()).bg(bs::code_surface()).font_family(theme::MONO_FONT)
-                .child(div().h(px(bs::CODE_HEADER * s)).pl(px(28. * s)).pr(px(8. * s)).rounded_t(px((bs::RADIUS - 1.) * s)).bg(bs::code_header()).flex().items_center().font_family(theme::UI_FONT).text_size(px(13. * s)).text_color(Theme::text_caption()).child(caption.clone().unwrap_or_else(|| crate::settings::text("代码块").into())));
+                .child(div().h(px(bs::CODE_HEADER * s)).pl(px(28. * s)).pr(px(8. * s)).rounded_t(px((bs::RADIUS - 1.) * s)).bg(bs::code_header()).flex().items_center().font_family(theme::ui_family()).text_size(px(13. * s)).text_color(Theme::text_caption()).child(caption.clone().unwrap_or_else(|| crate::settings::text("代码块").into())));
             let spans = crate::highlight::spans(lang, &b.text.text);
             let mut body = div().pt(px(14. * s)).pb(px(18. * s)).pr(px(20. * s)).flex().flex_col();
             let mut off = 0;
@@ -239,12 +285,18 @@ fn thumb_block_in(b: &crate::model::Block, depth: usize, inherited: Hsla, quote:
             for child in &b.children { node = node.child(div().py(px(9. * s)).px(px(6. * s)).flex().items_start().gap(px(6. * s)).child(icon("doc", 16. * s, Theme::icon())).child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(child.text.text.clone()))); }
             return node.into_any_element();
         }
+        // a 画板 block: its board fit into the block's box (painters cached by board version)
+        BlockKind::Board(bd) => {
+            let board = bd.clone();
+            return node.h(px(bd.height * s)).rounded(px(8. * s)).border(px(s)).border_color(Theme::line_border()).bg(crate::board::render::canvas_color(bd)).overflow_hidden()
+                .child(canvas(|_, _, _| {}, move |bounds, _, window, cx| crate::board::render::paint_card(&board, bounds, window, cx)).size_full()).into_any_element();
+        }
         BlockKind::Raw { tag, .. } => return node.p(px(8. * s)).rounded(px(8. * s)).bg(Theme::bg_overlay()).text_color(Theme::text_caption()).child(crate::localized_format!("<{tag}> 已保留的内容", "<{tag}> Preserved content")).into_any_element(),
         _ => {}
     }
     if b.kind.has_text() {
         let runs = b.text.runs.iter().map(|r| {
-            let mut f = font(if r.marks.code { theme::MONO_FONT } else { theme::UI_FONT });
+            let mut f = font(if r.marks.code { theme::MONO_FONT } else { theme::ui_family() });
             f.weight = if r.marks.bold { FontWeight::BOLD } else { bs::weight(&b.kind) };
             if r.marks.italic || quote { f.style = FontStyle::Italic; }
             let mut ink = if r.marks.link.is_some() { Theme::link() } else { r.marks.text_color.as_ref().and_then(|c| theme::text_color(&c.0)).map(bs::display_ink).unwrap_or(color) };
@@ -314,7 +366,7 @@ pub struct Home {
     sort: HomeSort,
     folders_first: bool,
     pub sort_menu: bool,
-    thumbs: RefCell<HashMap<String, (u64, Thumb, std::time::Instant)>>,
+    thumbs: RefCell<HashMap<String, (u64, Thumb, web_time::Instant)>>,
     /// Last-frame bounds of the controls the popovers hang from.
     anchors: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
     /// Folder cards and dragging into them (`home_folder.rs`).
@@ -399,7 +451,7 @@ fn weight3(mut d: Div) -> Div {
 fn entry_icon(e: &Entry) -> AnyElement {
     if e.meta.folder.is_some() { return icon("folder", 22., Theme::icon()).mr(px(13.)).into_any_element(); }
     match &e.icon {
-        _ if e.meta.markdown => crate::search::doc_icon_named("doc-md").mr(px(12.)).into_any_element(),
+        _ if e.meta.named_by_file() => crate::search::doc_icon_named(crate::search::file_glyph(&e.meta)).mr(px(12.)).into_any_element(),
         Some(em) => div().size(px(24.)).mr(px(12.)).flex_none().flex().items_center().justify_center().text_size(px(18.)).child(em.clone()).into_any_element(),
         None => doc_icon().mr(px(12.)).into_any_element(),
     }
@@ -433,7 +485,8 @@ impl Workspace {
 
     /// One level of the tree as 主页 shows it (a folder's page uses it too).
     pub(crate) fn level_entries(&self, parent: Option<&str>) -> Vec<Entry> {
-        self.sorted_entries(self.entries.iter().filter(|e| e.meta.parent.as_deref() == parent).cloned().collect())
+        // Folders under 本机文件 aren't the library's: not on its top level.
+        self.sorted_entries(self.entries.iter().filter(|e| e.meta.parent.as_deref() == parent && !(parent.is_none() && e.meta.mounted())).cloned().collect())
     }
 
     pub(crate) fn prepare_manual_order(&mut self, cx: &mut Context<Self>) -> bool {
@@ -465,17 +518,35 @@ impl Workspace {
 
     fn thumb(&self, e: &Entry) -> Thumb {
         use std::hash::{Hash, Hasher};
+        let mut stamp = rustc_hash::FxHasher::default();
+        e.meta.modified.hash(&mut stamp);
+        crate::settings::feishu().hash(&mut stamp);
+        // a 数据表's rows live in its file, saved apart from the index: its time is the card's too
+        let file_time = (e.meta.kind == crate::store::DocKind::Table).then(|| self.store.file_path(&e.id).and_then(|p| std::fs::metadata(p).ok()?.modified().ok())).flatten();
+        file_time.hash(&mut stamp);
+        // and a page's embedded tables: a row changed there redraws the card
+        let cached_tables = self.home.thumbs.borrow().get(&e.id).map(|(_, t, _)| tables_time(&t.tables)).unwrap_or(0);
+        let mut page_stamp = stamp.clone();
+        cached_tables.hash(&mut stamp);
+        let base_stamp = stamp.finish();
+        // If the preview contains no sibling subpages, modified + settings uniquely
+        // identifies it without rebuilding the whole tree on every frame.
+        if let Some((m, t, used)) = self.home.thumbs.borrow_mut().get_mut(&e.id)
+            && !t.has_subpages && *m == base_stamp { *used = web_time::Instant::now(); return t.clone(); }
         // A child-page list shows the other pages in the document's folder, as in
         // the open document (`sync_sub_pages`).
         let tree = crate::tree::Tree::new(&self.entries);
         let children: Vec<&Entry> = tree.children(e.meta.parent.as_deref()).iter().copied().filter(|p| p.id != e.id).collect();
-        let mut stamp = rustc_hash::FxHasher::default();
-        e.meta.modified.hash(&mut stamp);
-        crate::settings::feishu().hash(&mut stamp);
-        for child in &children { (&child.id, &child.title, &child.icon).hash(&mut stamp); }
-        let stamp = stamp.finish();
+        let mut full_stamp = rustc_hash::FxHasher::default();
+        e.meta.modified.hash(&mut full_stamp);
+        file_time.hash(&mut full_stamp);
+        crate::settings::feishu().hash(&mut full_stamp);
+        for child in &children { (&child.id, &child.title, &child.icon).hash(&mut full_stamp); }
+        let mut children_stamp = full_stamp.clone();
+        cached_tables.hash(&mut full_stamp);
+        let full_stamp = full_stamp.finish();
         if let Some((m, t, used)) = self.home.thumbs.borrow_mut().get_mut(&e.id)
-            && *m == stamp { *used = std::time::Instant::now(); return t.clone(); }
+            && *m == full_stamp { *used = web_time::Instant::now(); return t.clone(); }
         // The derived rows exist only in this preview tree and never enter the editor/store.
         fn subpages(blocks: &mut [crate::model::Block], entries: &[&Entry], budget: &mut usize) {
             for b in blocks {
@@ -488,37 +559,47 @@ impl Workspace {
                 }
             }
         }
-        let mut budget = 64;
+        let mut budget = 32;
         let mut eqnos = HashMap::new();
-        let mut cover = None;
-        let mut blocks = self.store.load(&e.id).map(|doc| {
-            cover = doc.cover.clone();
-            let numbers = crate::editor::equation_numbers(&doc);
+        let doc = self.store.load(&e.id);
+        let loaded = doc.as_ref().map(|doc| {
+            let numbers = crate::editor::equation_numbers(doc);
             thumb_blocks(&doc.blocks, &mut budget, 0, &numbers, &mut eqnos)
-        }).unwrap_or_default();
-        subpages(&mut blocks, &children, &mut budget);
-        let t: Thumb = Rc::new(ThumbContent { blocks, eqnos, cover });
+        });
+        let read = loaded.is_ok();
+        let mut blocks = loaded.unwrap_or_default();
+        let has_subpages = has_subpage_list(&blocks);
+        if has_subpages { subpages(&mut blocks, &children, &mut budget); }
+        let mut tables = vec![];
+        if let Ok(doc) = &doc { table_srcs(&doc.blocks, &mut tables); }
+        // stamped with the tables just found, so the next frame finds it
+        let tt = tables_time(&tables);
+        let stamp = if has_subpages { tt.hash(&mut children_stamp); children_stamp.finish() } else { tt.hash(&mut page_stamp); page_stamp.finish() };
+        let t: Thumb = Rc::new(ThumbContent { blocks, eqnos, has_subpages, tables });
+        // A failed read (mid-write by another process, still in iCloud) is not
+        // remembered: the card would stay blank until the document changes.
+        if !read { return t; }
         let mut thumbs = self.home.thumbs.borrow_mut();
         // Keep recent previews warm without retaining every document ever visited.
         if thumbs.len() >= 128 && !thumbs.contains_key(&e.id) {
             let oldest = thumbs.iter().min_by_key(|(_, (_, _, used))| *used).map(|(id, _)| id.clone());
             if let Some(id) = oldest { thumbs.remove(&id); }
         }
-        thumbs.insert(e.id.clone(), (stamp, t.clone(), std::time::Instant::now()));
+        thumbs.insert(e.id.clone(), (stamp, t.clone(), web_time::Instant::now()));
         t
     }
 
     fn open_row_menu(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
         let b = self.more_bounds.borrow().get(key).copied();
         let Some(b) = b else { return };
-        self.row_menu = Some(RowMenu { id: id.to_string(), pos: point(b.right(), b.bottom() + px(2.)), corner: Corner::TopRight, sub: false, batch: false });
+        self.row_menu = Some(RowMenu { id: id.to_string(), pos: point(b.right(), b.bottom() + px(2.)), corner: Anchor::TopRight, sub: false, batch: false });
         cx.notify();
     }
 
     pub(crate) fn home_more(&self, e: &Entry, key: String, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = e.id.clone();
         let (rec, k2) = (self.more_bounds.clone(), key.clone());
-        let open = self.row_menu.as_ref().is_some_and(|m| m.id == e.id && m.pos.x > px(0.) && m.corner == Corner::TopRight);
+        let open = self.row_menu.as_ref().is_some_and(|m| m.id == e.id && m.pos.x > px(0.) && m.corner == Anchor::TopRight);
         div()
             .id(SharedString::from(key.clone()))
             .relative()
@@ -603,11 +684,12 @@ impl Workspace {
             .when(narrow, |d| d.child(crate::ui::header_icon("home-search", "search").mr(px(4.))
                 .tip(crate::settings::tr("搜索文档", "Search documents"), Some(crate::shortcuts::hint("workspace::FocusSearch", "⌘ + J")))
                 .on_click(cx.listener(|w, _, window, cx| w.open_search(window, cx)))))
+            .child(self.place_button("home-more", None, cx))
             .child(self.import_button("home-import", None, cx))
             .child(
             crate::ui::header_icon("home-new", "plus")
                 .child(self.home.track("create-home"))
-                .when(self.create_menu.is_some(), |d| d.bg(Theme::fill_hover()))
+                .when(self.create_menu.as_ref().is_some_and(|(_, pos)| self.home.anchor("create-home").is_some_and(|b| point(b.left(), b.bottom() + px(4.)) == *pos)), |d| d.bg(Theme::fill_hover()))
                 .tip(crate::settings::tr("新建", "New"), Some(crate::shortcuts::hint("workspace::NewDoc", "⌘ + N")))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|w, ev: &ClickEvent, _, cx| { let pos = w.home.anchor("create-home").map_or(ev.position(), |b| point(b.left(), b.bottom() + px(4.))); w.create_menu = if w.create_menu.is_some() { None } else { Some((None, pos)) }; cx.notify(); })).into_any_element()
@@ -675,7 +757,9 @@ impl Workspace {
                 .child(text_btn("home-batch-exit", "x", crate::settings::text("退出"), true).ml(px(8.))
                     .tip(crate::settings::text("退出批量操作"), None)
                     .on_click(cx.listener(|w, _, _, cx| { w.batch = None; w.row_menu = None; cx.notify(); })))
-        } else { toolbar
+        } else { // Menu state at render: the popover's outside-press handler clears it on mouse-down, before a click
+            // would fire, so toggle on mouse-down from this snapshot.
+            let sort_open = self.home.sort_menu; toolbar
             .child(tab("home-tab-recent", crate::settings::text("我的文档"), HomeTab::Recent))
             .child(tab("home-tab-star", crate::settings::text("收藏"), HomeTab::Starred))
             .child(div().flex_1())
@@ -687,7 +771,7 @@ impl Workspace {
                     .hover(|s| s.bg(Theme::fill_hover())).when(self.home.sort_menu, |d| d.bg(Theme::fill_hover_strong()))
                     .child(icon("sort-down", 14., Theme::icon())).child(crate::settings::label(self.home.sort.label()))
                     .child(self.home.track("home-sort"))
-                    .on_click(cx.listener(|w, _, _, cx| { w.home.sort_menu = !w.home.sort_menu; cx.notify(); })),
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |w, _, _, cx| { cx.stop_propagation(); w.home.sort_menu = !sort_open; cx.notify(); })),
             )
             .child(self.view_switch(cx).ml(px(16.))
             ) };
@@ -717,8 +801,8 @@ impl Workspace {
         let cols = self.home.cols();
         let sort = self.home.sort_col();
         // The title is sized at about three times a column.
-        let title_cell = || div().flex_grow().flex_shrink().flex_basis(relative(0.)).min_w(px(200.));
-        let col_cell = || div().flex_grow().flex_shrink().flex_basis(relative(0.)).max_w(px(240.)).min_w(px(120.));
+        let title_cell = || div().flex_grow_1().flex_shrink_1().flex_basis(relative(0.)).min_w(px(200.));
+        let col_cell = || div().flex_grow_1().flex_shrink_1().flex_basis(relative(0.)).max_w(px(240.)).min_w(px(120.));
         // The list: 13pt tertiary headers over a hairline; the
         // sorted column in the text colour, semibold, with its arrow.
         let mut header = div()
@@ -736,6 +820,7 @@ impl Workspace {
             );
         for c in &cols {
             let sorted = !matches!(self.home.sort, HomeSort::Title | HomeSort::Manual) && *c == sort;
+            let sort_open = self.home.sort_menu;
             header = header.child(
                 col_cell().pl(px(20.)).child(
                     div()
@@ -756,8 +841,9 @@ impl Workspace {
                         .when(sorted, |d| {
                             d.child(icon("sort-down", 12., Theme::icon()))
                                 .cursor_pointer()
-                                .on_click(cx.listener(|w, _, _, cx| {
-                                    w.home.sort_menu = !w.home.sort_menu;
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |w, _, _, cx| {
+                                    cx.stop_propagation();
+                                    w.home.sort_menu = !sort_open;
                                     cx.notify();
                                 }))
                         }),
@@ -786,7 +872,7 @@ impl Workspace {
                 .when(check.is_none(), |d| d.on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
-                        w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Corner::TopLeft, sub: false, batch: false });
+                        w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch: false });
                         cx.notify();
                     }),
                 ))
@@ -822,7 +908,11 @@ impl Workspace {
         let gap = if mixed { 24. } else { 16. };
         let wide_cols = (((avail + gap) / (200. + gap)).floor() as usize).max(1);
         let n = if wide_cols >= 4 { (((avail + gap) / (240. + gap)).floor() as usize).max(4) } else { (((avail + gap) / (160. + gap)).floor() as usize).clamp(1, 3) };
-        let card_h = ((avail - gap * (n - 1) as f32) / n as f32) * (264. / 236.);
+        // A document card is always 5:6 at its column's width; folders stand
+        // taller by their tab so the pages line up beside them.
+        let col_w = (avail - gap * (n - 1) as f32) / n as f32;
+        let doc_h = col_w * (6. / 5.);
+        let card_h = if mixed { doc_h / (1. - crate::home_folder::TAB) } else { doc_h };
         let rows = entries.len().div_ceil(n);
         let grid = uniform_list("home-grid-area", rows, cx.processor(move |workspace, range: std::ops::Range<usize>, window, cx| {
             range.map(|row| {
@@ -831,20 +921,25 @@ impl Workspace {
                 div().w_full().h(px(card_h + gap)).px(px(24.)).pb(px(gap))
                     .grid().grid_cols(n as u16).gap(px(gap))
                     .children(entries[start..end].iter().map(|e| {
-                        if e.meta.folder.is_some() { workspace.render_folder_card(e, card_h, window, cx) }
+                        if e.meta.folder.is_some() { workspace.render_folder_card(e, col_w, card_h, window, cx) }
                         else if mixed { div().w_full().min_w_0().h(px(card_h)).flex().flex_col().justify_end()
-                            .child(workspace.render_home_card(e, card_h * (1. - crate::home_folder::TAB), cx)).into_any_element() }
+                            .child(workspace.render_home_card(e, doc_h, cx)).into_any_element() }
                         else { workspace.render_home_card(e, card_h, cx) }
                     }))
             }).collect()
         }))
-        // The last row's own 16 plus 16 more: 32 below the cards, like the
-        // list view's 24 and clear of the window's rounded corner.
+        // The last row's own 16 plus 32 more: 48 below the cards at the end,
+        // clear of the window's rounded corner. (32: GPUI 0.2's uniform_list
+        // counted its padding twice, and the cards end where that put them.)
         // The top padding sits inside the list's clip, so a folder's papers can
-        // rise above the first row without being cut off.
-        .flex_1().min_h_0().pt(px(14.)).pb(px(16.)).track_scroll(grid_scroll.clone());
+        // rise above the first row without being cut off — and that clip line is
+        // where a row scrolling out of sight stops. It used to sit 4pt higher,
+        // the list lifted into the tab row above it, so a scrolling row drew over
+        // 我的文档 / 收藏 and the buttons beside them (#238). 28 under that lift is
+        // 24 without it: the cards stay exactly where they were.
+        .flex_1().min_h_0().pt(px(24.)).pb(px(32.)).track_scroll(grid_scroll);
         let scroll = grid_scroll.0.borrow().base_handle.clone();
-        div().relative().flex_1().min_h_0().mt(px(-4.)).flex().flex_col()
+        div().relative().flex_1().min_h_0().flex().flex_col()
             .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, _, cx| w.track_home_press(ev, cx)))
             .child(grid).child(self.home.grid_scrollbar.render(&scroll)).into_any_element()
     }
@@ -853,6 +948,10 @@ impl Workspace {
     /// in a folder that show one (`home_folder.rs`). `pad`: its margin.
     pub(crate) fn thumb_page(&self, e: &Entry, pad: f32) -> Div {
         let thumb = self.thumb(e);
+        self.thumb_page_with(e, &thumb, pad)
+    }
+
+    fn thumb_page_with(&self, e: &Entry, thumb: &Thumb, pad: f32) -> Div {
         if thumb.blocks.is_empty() && e.title.trim().is_empty() {
                 div()
                     .size_full()
@@ -867,6 +966,11 @@ impl Workspace {
                 p = p.child(div().flex_none().flex().items_start().gap(px(6.)).mb(px(8.))
                     .when_some(e.icon.as_ref(), |d, emoji| d.child(div().flex_none().text_size(px(14.)).line_height(px(20.)).child(emoji.clone())))
                     .child(div().min_w_0().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::BOLD).child(e.title.clone())));
+                // A 画板: its board, drawn to fit the rest of the card.
+                if e.meta.kind == crate::store::DocKind::Board {
+                    let board = thumb.blocks.iter().find_map(|b| match &b.kind { BlockKind::Board(bd) => Some(bd.clone()), _ => None }).unwrap_or_default();
+                    return p.child(canvas(|_, _, _| {}, move |bounds, _, window, cx| crate::board::render::paint_card(&board, bounds, window, cx)).flex_1().w_full());
+                }
                 for (i, block) in thumb.blocks.iter().enumerate() {
                     let (mt, _) = bs::gap(&block.kind);
                     let prev = if i == 0 { 0. } else { bs::gap(&thumb.blocks[i - 1].kind).1 };
@@ -877,12 +981,12 @@ impl Workspace {
     }
 
     fn render_home_card(&self, e: &Entry, card_h: f32, cx: &mut Context<Self>) -> AnyElement {
+            const RING: f32 = 3.;
             let id = e.id.clone();
             let id2 = e.id.clone();
             let thumb = self.thumb(e);
-            let page = self.thumb_page(e, 18.);
-            let cover = thumb.cover.as_ref().and_then(|c| crate::store::image_path(&c.src));
-            let frame = 4.;
+            let page = self.thumb_page_with(e, &thumb, 18.);
+            let radius = 32.;
             let menu_on = self.row_menu.as_ref().is_some_and(|m| m.id == e.id);
             let check = self.home_check(e);
             let arm = e.id.clone();
@@ -891,7 +995,7 @@ impl Workspace {
             if self.home_dragging(&e.id) {
                 return div().id(SharedString::from(format!("home-card-{}", e.id))).w_full().min_w_0().h(px(card_h)).relative()
                     .child(self.record_home_card(&e.id))
-                    .child(crate::ui::continuous_surface(20., Theme::fill_hover()).size_full())
+                    .child(crate::ui::squircle_surface(radius, Theme::fill_hover()).size_full())
                     .into_any_element();
             }
                 div()
@@ -900,22 +1004,25 @@ impl Workspace {
                     .child(self.record_home_card(&e.id))
                     .w_full().min_w_0().h(px(card_h)).relative().group("home-card")
                     .flex_none()
-                    .bg(Theme::bg_overlay()).p(px(frame))
-                    .overflow_hidden()
+                    // A loose sheet on the home page: squircle corners, a 0.5pt
+                    // hairline and the faintest lift; hover darkens the hairline.
                     .cursor_pointer()
-                    .hover(|s| s.bg(Theme::fill_hover_strong()))
-                    .when(menu_on, |d| d.bg(Theme::fill_hover_strong()))
+                    // Inset as the folder card's shadow box is (6 a side, 10 from the top).
+                    .child(div().absolute().left(px(6.)).right(px(6.)).top(px(10.)).bottom_0().rounded(px(radius * 0.6)).shadow(theme::shadow_sheet()))
                     .on_click(cx.listener(move |w, _, window, cx| w.home_click(&id, window, cx)))
                     .when(check.is_none(), |d| d.on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
-                            w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Corner::TopLeft, sub: false, batch: false });
+                            w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch: false });
                             cx.notify();
                         }),
                     ))
-                    .when_some(cover, |d, path| d.child(img(path).doc_picture().absolute().inset_0().size_full().object_fit(ObjectFit::Fill)))
-                    .child(crate::ui::continuous_page(20. - frame).size_full().overflow_hidden().child(page.relative()))
-                    .child(crate::ui::continuous_corner_mask(20., Theme::bg_body()))
+                    .child(crate::ui::squircle_surface(radius, Theme::bg_body()).size_full().overflow_hidden().child(page.relative()))
+                    .child(crate::ui::squircle_outline(radius, 0.5, Theme::line_sheet()))
+                    // Hovered, or its menu open: a soft grey ring around the card.
+                    .child(div().absolute().left(px(-RING)).right(px(-RING)).top(px(-RING)).bottom(px(-RING))
+                        .when(!menu_on, |d| d.opacity(0.).group_hover("home-card", |s| s.opacity(1.)))
+                        .child(crate::ui::squircle_outline(radius + RING, RING, Theme::ring_sheet())))
                     .when_some(check, |d, c| d.child(div().absolute().top(px(12.)).left(px(12.)).child(c)))
                     .when(self.batch.is_none(), |d| d.child(
                         div().absolute().top(px(8.)).right(px(8.))
@@ -932,12 +1039,12 @@ impl Workspace {
         if self.view != crate::app::View::Home {
             return out;
         }
-        let place = |pos: Point<Pixels>, corner: Corner, menu: Stateful<Div>| {
+        let place = |pos: Point<Pixels>, corner: Anchor, menu: Stateful<Div>| {
             deferred(anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(2).into_any_element()
         };
         if self.home.sort_menu
             && let Some(b) = self.home.anchor("home-sort") {
-                let mut menu = popover().id("sort-menu").occlude().w(px(200.)).py(px(crate::ui::MENU_PAD_Y))
+                let mut menu = popover().id("sort-menu").occlude().min_w(px(200.)).py(px(crate::ui::MENU_PAD_Y))
                     .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.home.sort_menu = false; cx.notify(); }));
                 for (index, order) in [HomeSort::Manual, HomeSort::Visited, HomeSort::Modified, HomeSort::Created, HomeSort::Title].into_iter().enumerate() {
                     let g = SharedString::from(format!("home-order-{index}"));
@@ -959,7 +1066,7 @@ impl Workspace {
                     .child(menu_label(crate::settings::tr("文件夹优先", "Folders first"), g.clone(), gpui::white()).flex_1())
                     .when(self.home.folders_first && self.home.sort != HomeSort::Manual, |d| d.child(menu_glyph("check", 14., g)))
                     .on_click(cx.listener(|w, _, _, cx| { if w.home.sort == HomeSort::Manual { return; } w.home.folders_first = !w.home.folders_first; w.save_home(); w.home.sort_menu = false; cx.notify(); })));
-                out.push(place(point(b.right(), b.bottom() + px(4.)), Corner::TopRight, menu));
+                out.push(place(point(b.right(), b.bottom() + px(4.)), Anchor::TopRight, menu));
             }
         out
     }
